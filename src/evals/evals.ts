@@ -1,7 +1,10 @@
 //evals.ts
+
+import { EvalConfig } from 'mcp-evals';
 import { openai } from "@ai-sdk/openai";
-import { grade } from "mcp-evals";
-const send_emailEval = {
+import { grade, EvalFunction } from "mcp-evals";
+
+const send_emailEval: EvalFunction = {
     name: "send_emailEval",
     description: "Evaluates sending a new email",
     run: async () => {
@@ -9,7 +12,8 @@ const send_emailEval = {
         return JSON.parse(result);
     }
 };
-const draft_email = {
+
+const draft_email: EvalFunction = {
     name: 'draft_email',
     description: 'Evaluates the tool ability to draft an email',
     run: async () => {
@@ -17,7 +21,8 @@ const draft_email = {
         return JSON.parse(result);
     }
 };
-const read_emailEval = {
+
+const read_emailEval: EvalFunction = {
     name: 'read_email Tool Evaluation',
     description: 'Evaluates retrieving the content of a specific email',
     run: async () => {
@@ -25,7 +30,8 @@ const read_emailEval = {
         return JSON.parse(result);
     }
 };
-const search_emailsEval = {
+
+const search_emailsEval: EvalFunction = {
     name: "search_emails Tool Evaluation",
     description: "Evaluates the tool ability to search emails using Gmail syntax",
     run: async () => {
@@ -33,7 +39,8 @@ const search_emailsEval = {
         return JSON.parse(result);
     }
 };
-const modify_emailEval = {
+
+const modify_emailEval: EvalFunction = {
     name: 'modify_email Tool Evaluation',
     description: 'Evaluates the modify_email tool functionality',
     run: async () => {
@@ -41,8 +48,9 @@ const modify_emailEval = {
         return JSON.parse(result);
     }
 };
+
 // New filter management evaluations
-const create_filterEval = {
+const create_filterEval: EvalFunction = {
     name: 'create_filter Tool Evaluation',
     description: 'Evaluates creating a custom Gmail filter',
     run: async () => {
@@ -50,7 +58,8 @@ const create_filterEval = {
         return JSON.parse(result);
     }
 };
-const create_filter_templateEval = {
+
+const create_filter_templateEval: EvalFunction = {
     name: 'create_filter_template Tool Evaluation',
     description: 'Evaluates creating filters using predefined templates',
     run: async () => {
@@ -58,7 +67,8 @@ const create_filter_templateEval = {
         return JSON.parse(result);
     }
 };
-const list_filtersEval = {
+
+const list_filtersEval: EvalFunction = {
     name: 'list_filters Tool Evaluation',
     description: 'Evaluates listing all Gmail filters',
     run: async () => {
@@ -66,7 +76,8 @@ const list_filtersEval = {
         return JSON.parse(result);
     }
 };
-const filter_managementEval = {
+
+const filter_managementEval: EvalFunction = {
     name: 'filter_management Tool Evaluation',
     description: 'Evaluates comprehensive filter management operations',
     run: async () => {
@@ -74,13 +85,14 @@ const filter_managementEval = {
         return JSON.parse(result);
     }
 };
-const config = {
+
+const config: EvalConfig = {
     model: openai("gpt-4"),
     evals: [
-        send_emailEval,
-        draft_email,
-        read_emailEval,
-        search_emailsEval,
+        send_emailEval, 
+        draft_email, 
+        read_emailEval, 
+        search_emailsEval, 
         modify_emailEval,
         create_filterEval,
         create_filter_templateEval,
@@ -88,12 +100,14 @@ const config = {
         filter_managementEval
     ]
 };
+  
 export default config;
+  
 export const evals = [
-    send_emailEval,
-    draft_email,
-    read_emailEval,
-    search_emailsEval,
+    send_emailEval, 
+    draft_email, 
+    read_emailEval, 
+    search_emailsEval, 
     modify_emailEval,
     create_filterEval,
     create_filter_templateEval,

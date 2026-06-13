@@ -362,7 +362,9 @@ export function toMcpTools(tools: ToolDefinition[]) {
   return tools.map(tool => ({
     name: tool.name,
     description: tool.description,
-    inputSchema: zodToJsonSchema(tool.schema),
+    // Cast to any: zod 3.25 + TS 5.9 otherwise hit TS2589 (excessively deep type
+    // instantiation) on the union of schema types. Runtime behaviour is unchanged.
+    inputSchema: zodToJsonSchema(tool.schema as any),
     annotations: tool.annotations,
   }));
 }

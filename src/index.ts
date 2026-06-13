@@ -21,6 +21,7 @@ import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
 import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
+import { loadAllowlist, isAllowed, allowlistToFromQuery, combineQuery, blockedMessage, Allowlist } from "./allowlist.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -287,6 +288,41 @@ async function main() {
     // Initialize Gmail API
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
+    // Load the read-allowlist policy (Feature 2) for this account.
+    const readAllowlist: Allowlist = loadAllowlist({
+        env: process.env.GMAIL_READ_ALLOWLIST,
+        allowlistPath: process.env.GMAIL_ALLOWLIST_PATH,
+        credentialsPath: CREDENTIALS_PATH,
+    });
+    // The account's own address is always trusted (so own sent messages in a
+    // thread are never filtered out). Does not flip `configured` — if nothing was
+    // configured, reads still fail closed.
+    try {
+        const profile = await gmail.users.getProfile({ userId: 'me' });
+        if (profile.data.emailAddress) {
+            readAllowlist.addresses.add(profile.data.emailAddress.toLowerCase());
+        }
+    } catch (e: any) {
+        console.warn(`Warning: could not fetch profile for self-allowlisting: ${e?.message}`);
+    }
+    if (!readAllowlist.configured) {
+        console.warn(
+            'Read allowlist is not configured — all read/search results are blocked (fail-closed). '
+            + 'Set GMAIL_READ_ALLOWLIST or an allowlist JSON file beside the credentials.'
+        );
+    }
+
+    /**
+     * Read guard: returns a refusal content object if reading mail from
+     * `fromHeader` is not permitted by the allowlist, or null if allowed.
+     */
+    const readGuard = (fromHeader: string, context?: string) => {
+        if (isAllowed(fromHeader, readAllowlist)) return null;
+        return {
+            content: [{ type: "text" as const, text: blockedMessage(readAllowlist, context) }],
+        };
+    };
+
     // Server implementation
     const server = new Server(
         {
@@ -547,6 +583,11 @@ async function main() {
                     });
 
                     const { subject, from, to, date, rfcMessageId, inReplyTo, references } = extractHeaders(response.data.payload);
+
+                    // Allowlist guard: never surface mail from untrusted senders.
+                    const readBlock = readGuard(from, 'This email');
+                    if (readBlock) return readBlock;
+
                     const threadId = response.data.threadId || '';
                     const { text, html } = extractEmailContent(response.data.payload as GmailMessagePart || {});
                     const attachments = extractAttachments(response.data.payload as GmailMessagePart);
@@ -573,14 +614,23 @@ async function main() {
 
                 case "search_emails": {
                     const validatedArgs = SearchEmailsSchema.parse(args);
+
+                    // Allowlist guard: fail closed if nothing is configured.
+                    if (!readAllowlist.configured) {
+                        return { content: [{ type: "text", text: blockedMessage(readAllowlist) }] };
+                    }
+                    // Restrict the query to allowlisted senders up front (defence in depth;
+                    // we also post-filter below so nothing off-list can ever be returned).
+                    const guardedQuery = combineQuery(validatedArgs.query, allowlistToFromQuery(readAllowlist));
+
                     const response = await gmail.users.messages.list({
                         userId: 'me',
-                        q: validatedArgs.query,
+                        q: guardedQuery,
                         maxResults: validatedArgs.maxResults || 10,
                     });
 
                     const messages = response.data.messages || [];
-                    const results = await Promise.all(
+                    const allResults = await Promise.all(
                         messages.map(async (msg) => {
                             const detail = await gmail.users.messages.get({
                                 userId: 'me',
@@ -597,6 +647,8 @@ async function main() {
                             };
                         })
                     );
+                    // Post-filter: drop anything whose sender is not allowlisted.
+                    const results = allResults.filter(r => isAllowed(r.from, readAllowlist));
 
                     return {
                         content: [
@@ -628,6 +680,11 @@ async function main() {
                         });
 
                         const { subject, from, date } = extractHeaders(fullResponse.data.payload);
+
+                        // Allowlist guard: do not write untrusted mail to disk.
+                        const dlBlock = readGuard(from, 'This email');
+                        if (dlBlock) return dlBlock;
+
                         const attachments = extractAttachments(fullResponse.data.payload as GmailMessagePart);
 
                         let content: string;
@@ -1095,6 +1152,18 @@ async function main() {
                     const validatedArgs = DownloadAttachmentSchema.parse(args);
 
                     try {
+                        // Allowlist guard: resolve the message's sender before fetching anything.
+                        const senderMeta = await gmail.users.messages.get({
+                            userId: 'me',
+                            id: validatedArgs.messageId,
+                            format: 'metadata',
+                            metadataHeaders: ['From'],
+                        });
+                        const attFrom = senderMeta.data.payload?.headers
+                            ?.find(h => h.name?.toLowerCase() === 'from')?.value || '';
+                        const attBlock = readGuard(attFrom, 'This attachment');
+                        if (attBlock) return attBlock;
+
                         // Get the attachment data from Gmail API
                         const attachmentResponse = await gmail.users.messages.attachments.get({
                             userId: 'me',
@@ -1241,14 +1310,19 @@ async function main() {
                         };
                     });
 
+                    // Allowlist guard: only surface messages from trusted senders.
+                    const visibleMessages = messagesOutput.filter(m => isAllowed(m.from, readAllowlist));
+                    const withheldCount = messagesOutput.length - visibleMessages.length;
+
                     return {
                         content: [
                             {
                                 type: "text",
                                 text: JSON.stringify({
                                     threadId: validatedArgs.threadId,
-                                    messageCount: messagesOutput.length,
-                                    messages: messagesOutput,
+                                    messageCount: visibleMessages.length,
+                                    withheldCount,
+                                    messages: visibleMessages,
                                 }, null, 2),
                             },
                         ],
@@ -1293,13 +1367,16 @@ async function main() {
                         })
                     );
 
+                    // Allowlist guard: only surface threads whose latest sender is trusted.
+                    const visibleThreads = threadDetails.filter(t => isAllowed(t.latestMessage.from, readAllowlist));
+
                     return {
                         content: [
                             {
                                 type: "text",
                                 text: JSON.stringify({
-                                    resultCount: threadDetails.length,
-                                    threads: threadDetails,
+                                    resultCount: visibleThreads.length,
+                                    threads: visibleThreads,
                                 }, null, 2),
                             },
                         ],
@@ -1345,13 +1422,16 @@ async function main() {
                             })
                         );
 
+                        // Allowlist guard: only surface threads whose latest sender is trusted.
+                        const visibleSummaries = threadSummaries.filter(t => isAllowed(t.latestMessage.from, readAllowlist));
+
                         return {
                             content: [
                                 {
                                     type: "text",
                                     text: JSON.stringify({
-                                        resultCount: threadSummaries.length,
-                                        threads: threadSummaries,
+                                        resultCount: visibleSummaries.length,
+                                        threads: visibleSummaries,
                                     }, null, 2),
                                 },
                             ],
@@ -1420,21 +1500,28 @@ async function main() {
                                 };
                             });
 
+                            // Allowlist guard: keep only messages from trusted senders.
+                            const visible = messages.filter(m => isAllowed(m.from, readAllowlist));
+
                             return {
                                 threadId: thread.id || '',
-                                messageCount: messages.length,
-                                messages,
+                                messageCount: visible.length,
+                                withheldCount: messages.length - visible.length,
+                                messages: visible,
                             };
                         })
                     );
+
+                    // Drop threads that have no trusted messages left.
+                    const visibleExpanded = expandedThreads.filter(t => t.messageCount > 0);
 
                     return {
                         content: [
                             {
                                 type: "text",
                                 text: JSON.stringify({
-                                    resultCount: expandedThreads.length,
-                                    threads: expandedThreads,
+                                    resultCount: visibleExpanded.length,
+                                    threads: visibleExpanded,
                                 }, null, 2),
                             },
                         ],

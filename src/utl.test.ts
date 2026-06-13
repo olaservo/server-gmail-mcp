@@ -89,4 +89,20 @@ describe('Source verification', () => {
         expect(source).toContain('rfcMessageId');
         expect(source).toContain('Message-ID: ${rfcMessageId}');
     });
+
+    it('read_email also surfaces In-Reply-To and References headers', () => {
+        const source = fs.readFileSync(path.join(srcDir, 'index.ts'), 'utf-8');
+        // extractHeaders pulls the reply headers...
+        expect(source).toContain('inReplyTo: getHeader("in-reply-to")');
+        expect(source).toContain('references: getHeader("references")');
+        // ...and read_email's output includes them when present.
+        expect(source).toContain('In-Reply-To: ${inReplyTo}');
+        expect(source).toContain('References: ${references}');
+    });
+
+    it('handleEmailAction lets messageIdHeader override auto-resolution', () => {
+        const source = fs.readFileSync(path.join(srcDir, 'index.ts'), 'utf-8');
+        expect(source).toContain('validatedArgs.messageIdHeader && !validatedArgs.inReplyTo');
+        expect(source).toContain('validatedArgs.inReplyTo = validatedArgs.messageIdHeader');
+    });
 });

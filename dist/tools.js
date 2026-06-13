@@ -10,8 +10,10 @@ export const SendEmailSchema = z.object({
     mimeType: z.enum(['text/plain', 'text/html', 'multipart/alternative']).optional().default('text/plain').describe("Email content type"),
     cc: z.array(z.string()).optional().describe("List of CC recipients"),
     bcc: z.array(z.string()).optional().describe("List of BCC recipients"),
-    threadId: z.string().optional().describe("Thread ID to reply to"),
-    inReplyTo: z.string().optional().describe("Message ID being replied to"),
+    threadId: z.string().optional().describe("Gmail thread ID to reply into (sender-local; groups the message on the sender's side). When set without inReplyTo/messageIdHeader, the RFC threading headers are resolved automatically from the thread."),
+    inReplyTo: z.string().optional().describe("RFC2822 Message-ID header of the parent message being replied to (e.g. '<abc@mail.gmail.com>'), NOT Gmail's internal hex message ID. Drives threading in the recipient's mailbox. Usually left unset so it is resolved automatically from threadId."),
+    messageIdHeader: z.string().optional().describe("Explicit RFC2822 Message-ID header of the parent (e.g. '<abc@mail.gmail.com>'). Alias for inReplyTo that overrides automatic threadId-based resolution. Get it from read_email's 'Message-ID' line."),
+    references: z.string().optional().describe("RFC2822 References header: space-separated chain of ancestor Message-IDs ending with the parent's. Usually left unset so it is resolved automatically from threadId."),
     attachments: z.array(z.string()).optional().describe("List of file paths to attach to the email"),
 });
 export const ReadEmailSchema = z.object({

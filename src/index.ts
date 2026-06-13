@@ -92,7 +92,7 @@ function extractEmailContent(messagePart: GmailMessagePart): EmailContent {
 /**
  * Extract common headers from Gmail message payload
  */
-function extractHeaders(payload: any): { subject: string; from: string; to: string; date: string; rfcMessageId: string } {
+function extractHeaders(payload: any): { subject: string; from: string; to: string; date: string; rfcMessageId: string; inReplyTo: string; references: string } {
     const headers = payload?.headers || [];
     const getHeader = (name: string) =>
         headers.find((h: any) => h.name?.toLowerCase() === name.toLowerCase())?.value || "";
@@ -102,6 +102,8 @@ function extractHeaders(payload: any): { subject: string; from: string; to: stri
         to: getHeader("to"),
         date: getHeader("date"),
         rfcMessageId: getHeader("message-id"),
+        inReplyTo: getHeader("in-reply-to"),
+        references: getHeader("references"),
     };
 }
 
@@ -326,6 +328,15 @@ async function main() {
             let message: string;
 
             try {
+                // An explicit messageIdHeader (RFC2822 Message-ID of the parent) overrides
+                // automatic resolution: use it as In-Reply-To, and seed References if absent.
+                if (validatedArgs.messageIdHeader && !validatedArgs.inReplyTo) {
+                    validatedArgs.inReplyTo = validatedArgs.messageIdHeader;
+                    if (!validatedArgs.references) {
+                        validatedArgs.references = validatedArgs.messageIdHeader;
+                    }
+                }
+
                 // Auto-resolve threading headers when threadId is provided but inReplyTo is missing
                 if (validatedArgs.threadId && !validatedArgs.inReplyTo) {
                     try {
@@ -535,7 +546,7 @@ async function main() {
                         format: 'full',
                     });
 
-                    const { subject, from, to, date, rfcMessageId } = extractHeaders(response.data.payload);
+                    const { subject, from, to, date, rfcMessageId, inReplyTo, references } = extractHeaders(response.data.payload);
                     const threadId = response.data.threadId || '';
                     const { text, html } = extractEmailContent(response.data.payload as GmailMessagePart || {});
                     const attachments = extractAttachments(response.data.payload as GmailMessagePart);
@@ -554,7 +565,7 @@ async function main() {
                         content: [
                             {
                                 type: "text",
-                                text: `Thread ID: ${threadId}\nMessage-ID: ${rfcMessageId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\n\n${contentTypeNote}${body}${attachmentInfo}`,
+                                text: `Thread ID: ${threadId}\nMessage-ID: ${rfcMessageId}${inReplyTo ? `\nIn-Reply-To: ${inReplyTo}` : ''}${references ? `\nReferences: ${references}` : ''}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\n\n${contentTypeNote}${body}${attachmentInfo}`,
                             },
                         ],
                     };

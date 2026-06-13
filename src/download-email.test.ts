@@ -256,7 +256,7 @@ describe("extractHeaders refactor - source verification", () => {
 
   it("read_email uses extractHeaders (not inline header extraction)", () => {
     // The read_email case should use destructured extractHeaders call
-    expect(indexSource).toContain("const { subject, from, to, date, rfcMessageId } = extractHeaders(");
+    expect(indexSource).toContain("const { subject, from, to, date, rfcMessageId, inReplyTo, references } = extractHeaders(");
   });
 
   it("download_email uses extractHeaders", () => {

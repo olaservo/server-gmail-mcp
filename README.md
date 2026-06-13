@@ -1,4 +1,54 @@
-# Gmail AutoAuth MCP Server (Actively Maintained Fork)
+# Gmail AutoAuth MCP Server (`@olaservo` fork)
+
+> **This is `@olaservo/server-gmail-autoauth-mcp`** — a fork of
+> [`lowrykun/server-gmail-mcp`](https://github.com/lowrykun/server-gmail-mcp) (itself a fork of the
+> archived `@gongrzhe/server-gmail-autoauth-mcp`). It adds two things on top:
+>
+> 1. **Cross-account reply threading.** Replies now thread correctly in the *recipient's* mailbox,
+>    not just the sender's. When you reply with a `threadId`, the server resolves the parent's real
+>    RFC2822 `Message-ID` from the thread and writes proper `In-Reply-To`/`References` headers (the
+>    Gmail per-mailbox `threadId` alone doesn't thread across accounts). `read_email` now also
+>    surfaces `Message-ID`, `In-Reply-To` and `References`, and `send_email`/`draft_email` accept an
+>    explicit `messageIdHeader` to override auto-resolution.
+> 2. **Read allowlist (fail-closed).** Read/search tools only ever return mail from trusted senders,
+>    guarding against ingesting untrusted/adversarial email (a prompt-injection surface) when
+>    triaging an inbox. See [Read allowlist](#read-allowlist-trusted-senders-only) below.
+
+## Read allowlist (trusted senders only)
+
+An app-level policy (independent of OAuth scope) that restricts the **read** tools — `read_email`,
+`search_emails`, `download_email`, `download_attachment`, `get_thread`, `list_inbox_threads`,
+`get_inbox_with_threads` — so they only ever surface mail whose sender is on a per-account trusted
+list. Send/draft/label/filter tools are unaffected.
+
+- **Fails closed:** if no allowlist is configured, *all* reads are blocked with a message telling you
+  to populate it. Set it deliberately.
+- **Self is always trusted:** the account's own address (from the Gmail profile) is added
+  automatically, so your own sent messages in a thread are never filtered out.
+- **Matching:** exact address (`alice@example.com`) or whole domain (`@example.com` /
+  `example.com`), case-insensitive.
+
+Configure via either or both (merged):
+
+- **Env** `GMAIL_READ_ALLOWLIST` — comma/semicolon/whitespace separated, e.g.
+  `GMAIL_READ_ALLOWLIST="alice@example.com, @trusted.org"`.
+- **JSON file** `GMAIL_ALLOWLIST_PATH`, or, if unset, auto-derived from the credentials path
+  (`credentials-johnny.json` → `allowlist-johnny.json` in the same directory). Array or object form:
+
+  ```json
+  { "addresses": ["alice@example.com"], "domains": ["trusted.org"] }
+  ```
+  ```json
+  ["alice@example.com", "@trusted.org"]
+  ```
+
+`search_emails` injects a `from:(…)` clause into the Gmail query *and* post-filters results, so
+nothing off-list can be returned even if the query is crafted to bypass it. Thread/inbox tools omit
+off-list messages and report a `withheldCount`.
+
+---
+
+# Gmail AutoAuth MCP Server (upstream notes)
 
 [![CI](https://github.com/ArtyMcLabin/Gmail-MCP-Server/actions/workflows/ci.yml/badge.svg)](https://github.com/ArtyMcLabin/Gmail-MCP-Server/actions/workflows/ci.yml)
 

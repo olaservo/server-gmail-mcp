@@ -1,7 +1,7 @@
 {
-  "name": "@lowrykun/server-gmail-mcp",
-  "version": "2.0.0",
-  "description": "Gmail MCP server with auto authentication support",
+  "name": "@olaservo/server-gmail-autoauth-mcp",
+  "version": "2.1.0",
+  "description": "Gmail MCP server with auto OAuth: cross-account reply threading (RFC Message-ID/References) and a fail-closed read allowlist of trusted senders.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -31,16 +31,20 @@
     "claude",
     "auto-auth"
   ],
-  "author": "gongrzhe",
+  "author": "olaservo",
+  "contributors": [
+    "gongrzhe (original @gongrzhe/server-gmail-autoauth-mcp)",
+    "lowrykun (server-gmail-mcp fork)"
+  ],
   "license": "ISC",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lowrykun/server-gmail-mcp.git"
+    "url": "git+https://github.com/olaservo/server-gmail-autoauth-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/lowrykun/server-gmail-mcp/issues"
+    "url": "https://github.com/olaservo/server-gmail-autoauth-mcp/issues"
   },
-  "homepage": "https://github.com/lowrykun/server-gmail-mcp#readme",
+  "homepage": "https://github.com/olaservo/server-gmail-autoauth-mcp#readme",
   "publishConfig": {
     "access": "public"
   },

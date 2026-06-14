@@ -1,7 +1,7 @@
 {
   "name": "@olaservo/server-gmail-autoauth-mcp",
-  "version": "2.1.0",
-  "description": "Gmail MCP server with auto OAuth: cross-account reply threading (RFC Message-ID/References) and a fail-closed read allowlist of trusted senders.",
+  "version": "2.2.0",
+  "description": "Gmail MCP server with auto OAuth: cross-account reply threading (RFC Message-ID/References), a fail-closed read allowlist of trusted senders, and read-only tools by default (writes opt-in via GMAIL_ENABLE_WRITE_TOOLS).",
   "type": "module",
   "main": "dist/index.js",
   "bin": {

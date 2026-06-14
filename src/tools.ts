@@ -375,3 +375,8 @@ export function toMcpTools(tools: ToolDefinition[]) {
 export function getToolByName(name: string): ToolDefinition | undefined {
   return toolDefinitions.find(t => t.name === name);
 }
+
+// A tool is read-only iff it declares readOnlyHint. Everything else mutates state.
+export function isReadOnlyTool(tool: ToolDefinition): boolean {
+  return tool.annotations.readOnlyHint === true;
+}

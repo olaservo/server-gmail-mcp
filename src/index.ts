@@ -19,7 +19,7 @@ import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, get
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
-import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema } from "./tools.js";
+import { toolDefinitions, toMcpTools, getToolByName, isReadOnlyTool, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 import { loadAllowlist, isAllowed, allowlistToFromQuery, combineQuery, blockedMessage, Allowlist } from "./allowlist.js";
 
@@ -312,6 +312,17 @@ async function main() {
         );
     }
 
+    // Write tools (send, draft, reply, delete, modify, label/filter management) are disabled
+    // by default. The server exposes only read-only tools unless explicitly opted in. This is
+    // layered on top of the OAuth-scope filter and works with existing credentials.
+    const writeToolsEnabled = /^(1|true|yes)$/i.test((process.env.GMAIL_ENABLE_WRITE_TOOLS || '').trim());
+    if (!writeToolsEnabled) {
+        console.warn(
+            'Write tools are disabled (read-only mode). '
+            + 'Set GMAIL_ENABLE_WRITE_TOOLS=true to enable send/draft/delete/label/filter tools.'
+        );
+    }
+
     /**
      * Read guard: returns a refusal content object if reading mail from
      * `fromHeader` is not permitted by the allowlist, or null if allowed.
@@ -340,7 +351,8 @@ async function main() {
     // Filter available tools based on authorized scopes
     server.setRequestHandler(ListToolsRequestSchema, async () => {
         const availableTools = toolDefinitions.filter(tool =>
-            hasScope(authorizedScopes, tool.scopes)
+            hasScope(authorizedScopes, tool.scopes) &&
+            (writeToolsEnabled || isReadOnlyTool(tool))
         );
         return { tools: toMcpTools(availableTools) };
     });
@@ -356,6 +368,16 @@ async function main() {
                 content: [{
                     type: "text",
                     text: `Error: Tool "${name}" is not available. You may need to re-authenticate with additional scopes.`,
+                }],
+            };
+        }
+
+        // Guard against direct calls to write tools while in read-only (default) mode.
+        if (!writeToolsEnabled && !isReadOnlyTool(toolDef)) {
+            return {
+                content: [{
+                    type: "text",
+                    text: `Error: Tool "${name}" is a write operation and is disabled. Set GMAIL_ENABLE_WRITE_TOOLS=true to enable write tools.`,
                 }],
             };
         }

@@ -13,6 +13,9 @@
 > 2. **Read allowlist (fail-closed).** Read/search tools only ever return mail from trusted senders,
 >    guarding against ingesting untrusted/adversarial email (a prompt-injection surface) when
 >    triaging an inbox. See [Read allowlist](#read-allowlist-trusted-senders-only) below.
+> 3. **Read-only by default.** The server exposes only read-only tools unless you set
+>    `GMAIL_ENABLE_WRITE_TOOLS=true`. Send/draft/reply/delete/modify and label/filter management are
+>    hidden until opted in. See [Read-only by default](#read-only-by-default) below.
 
 ## Read allowlist (trusted senders only)
 
@@ -45,6 +48,23 @@ Configure via either or both (merged):
 `search_emails` injects a `from:(…)` clause into the Gmail query *and* post-filters results, so
 nothing off-list can be returned even if the query is crafted to bypass it. Thread/inbox tools omit
 off-list messages and report a `withheldCount`.
+
+## Read-only by default
+
+By default the server exposes **only read-only tools**. The write tools — `send_email`,
+`draft_email`, `reply_all`, `modify_email`, `delete_email`, `batch_modify_emails`,
+`batch_delete_emails`, `create_label`, `update_label`, `delete_label`, `get_or_create_label`,
+`create_filter`, `delete_filter`, `create_filter_from_template` — are hidden from `tools/list`
+and refused if called directly.
+
+- **Enable writes:** set `GMAIL_ENABLE_WRITE_TOOLS=true` (also accepts `1` / `yes`). Restart the
+  server for the change to take effect.
+- **Independent of OAuth scope.** This gate is layered *on top of* the scope filter, so it works
+  with existing credentials — no re-authentication needed. (Write tools still require the matching
+  OAuth scope to actually run; see [OAuth Scopes](#oauth-scopes) below.)
+- The read tools that remain available are still subject to the fail-closed read allowlist above.
+  Note that `list_email_labels`, `list_filters`, and `get_filter` are read-only and therefore stay
+  available by default.
 
 ---
 
@@ -284,6 +304,9 @@ npx @gongrzhe/server-gmail-autoauth-mcp auth --scopes=gmail.modify,gmail.setting
 
 If no `--scopes` flag is provided, the server defaults to `gmail.modify,gmail.settings.basic` for full functionality.
 
+> **Note**: OAuth scopes are not the only gate. Even with write scopes granted, write tools stay
+> hidden until you set `GMAIL_ENABLE_WRITE_TOOLS=true` — see [Read-only by default](#read-only-by-default).
+
 ### Scope-to-Tool Mapping
 
 The server automatically filters available tools based on your authorized scopes:
@@ -326,15 +349,22 @@ Then add to your Claude Code MCP settings (`~/.claude/mcp_settings.json` or proj
 }
 ```
 
-With read-only scopes, only these 4 tools will be available to Claude:
+With read-only scopes, only these read-only tools are available to Claude:
 - `read_email` - Read email content
 - `search_emails` - Search your inbox
-- `list_email_labels` - List available labels
 - `download_attachment` - Download attachments
+- `download_email` - Download an email to a file
+- `get_thread` - Read a full thread
+- `list_inbox_threads` - List threads
+- `get_inbox_with_threads` - List threads with full message bodies
+- `list_email_labels` - List available labels
+
+(This is also the default tool set for *any* scope when `GMAIL_ENABLE_WRITE_TOOLS` is not set.)
 
 ### Full Access Configuration
 
-For full Gmail management capabilities:
+For full Gmail management capabilities, authenticate with write scopes **and** set
+`GMAIL_ENABLE_WRITE_TOOLS=true` (write tools are hidden by default):
 
 ```bash
 npx @gongrzhe/server-gmail-autoauth-mcp auth --scopes=gmail.modify,gmail.settings.basic
@@ -345,13 +375,18 @@ npx @gongrzhe/server-gmail-autoauth-mcp auth --scopes=gmail.modify,gmail.setting
   "mcpServers": {
     "gmail": {
       "command": "npx",
-      "args": ["@gongrzhe/server-gmail-autoauth-mcp"]
+      "args": ["@gongrzhe/server-gmail-autoauth-mcp"],
+      "env": {
+        "GMAIL_ENABLE_WRITE_TOOLS": "true"
+      }
     }
   }
 }
 ```
 
-This enables all 20 tools including sending emails, managing labels, creating filters, reply-all, and batch operations.
+This enables all tools including sending emails, managing labels, creating filters, reply-all, and
+batch operations. Without `GMAIL_ENABLE_WRITE_TOOLS=true`, only the read-only tools are exposed even
+with `gmail.modify` granted.
 
 ## Available Tools
 

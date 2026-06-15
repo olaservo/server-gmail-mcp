@@ -247,11 +247,13 @@ describe("DownloadEmailSchema", () => {
 // ─────────────────────────────────────────────
 describe("extractHeaders refactor - source verification", () => {
   const indexSource = fs.readFileSync(path.join(__dirname, "index.ts"), "utf-8");
+  // extractHeaders now lives in the shared gmail-client module; index.ts only uses it.
+  const clientSource = fs.readFileSync(path.join(__dirname, "gmail-client.ts"), "utf-8");
 
   it("extractHeaders function exists and returns rfcMessageId", () => {
-    expect(indexSource).toContain("function extractHeaders");
-    expect(indexSource).toContain("rfcMessageId");
-    expect(indexSource).toContain('getHeader("message-id")');
+    expect(clientSource).toContain("function extractHeaders");
+    expect(clientSource).toContain("rfcMessageId");
+    expect(clientSource).toContain('getHeader("message-id")');
   });
 
   it("read_email uses extractHeaders (not inline header extraction)", () => {

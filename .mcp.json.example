@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "gmail-channel": {
+      "command": "node",
+      "args": ["dist/channel.js"],
+      "env": {
+        "GMAIL_CREDENTIALS_PATH": "/absolute/path/to/.gmail-mcp/credentials.json",
+        "GMAIL_CHANNEL_LABEL": "your-label-name",
+        "GMAIL_CHANNEL_POLL_SECONDS": "30",
+        "GMAIL_CHANNEL_ALLOWED_SENDERS": "alice@example.com, @trusted-domain.com"
+      }
+    }
+  }
+}

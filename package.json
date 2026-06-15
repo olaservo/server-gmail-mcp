@@ -10,6 +10,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
+    "channel": "node dist/channel.js",
     "auth": "node dist/index.js auth",
     "test": "vitest run",
     "test:watch": "vitest",

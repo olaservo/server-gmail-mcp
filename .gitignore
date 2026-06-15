@@ -1,1 +1,5 @@
 node_modules/
+
+# Local channel registration (contains machine-specific creds path + label).
+# Copy .mcp.json.example to .mcp.json and fill in your values.
+.mcp.json

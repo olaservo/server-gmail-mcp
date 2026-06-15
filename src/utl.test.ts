@@ -92,9 +92,10 @@ describe('Source verification', () => {
 
     it('read_email also surfaces In-Reply-To and References headers', () => {
         const source = fs.readFileSync(path.join(srcDir, 'index.ts'), 'utf-8');
-        // extractHeaders pulls the reply headers...
-        expect(source).toContain('inReplyTo: getHeader("in-reply-to")');
-        expect(source).toContain('references: getHeader("references")');
+        const clientSource = fs.readFileSync(path.join(srcDir, 'gmail-client.ts'), 'utf-8');
+        // extractHeaders (now in the shared gmail-client module) pulls the reply headers...
+        expect(clientSource).toContain('inReplyTo: getHeader("in-reply-to")');
+        expect(clientSource).toContain('references: getHeader("references")');
         // ...and read_email's output includes them when present.
         expect(source).toContain('In-Reply-To: ${inReplyTo}');
         expect(source).toContain('References: ${references}');

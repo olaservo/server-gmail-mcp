@@ -6,251 +6,21 @@ import {
     CallToolRequestSchema,
     ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { google } from 'googleapis';
-import { OAuth2Client } from 'google-auth-library';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
-import http from 'http';
-import open from 'open';
-import os from 'os';
 import {createEmailMessage, createEmailWithNodemailer} from "./utl.js";
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
-import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
+import { DEFAULT_SCOPES, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
 import { toolDefinitions, toMcpTools, getToolByName, isReadOnlyTool, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 import { loadAllowlist, isAllowed, allowlistToFromQuery, combineQuery, blockedMessage, Allowlist } from "./allowlist.js";
+import { CREDENTIALS_PATH, loadCredentials, authenticate, getGmail, getAuthorizedScopes, extractEmailContent, extractHeaders, extractAttachments, dmarcPassed, GmailMessagePart, EmailContent } from "./gmail-client.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-// Configuration paths
-const CONFIG_DIR = path.join(os.homedir(), '.gmail-mcp');
-const OAUTH_PATH = process.env.GMAIL_OAUTH_PATH || path.join(CONFIG_DIR, 'gcp-oauth.keys.json');
-const CREDENTIALS_PATH = process.env.GMAIL_CREDENTIALS_PATH || path.join(CONFIG_DIR, 'credentials.json');
-
-// Type definitions for Gmail API responses
-interface GmailMessagePart {
-    partId?: string;
-    mimeType?: string;
-    filename?: string;
-    headers?: Array<{
-        name: string;
-        value: string;
-    }>;
-    body?: {
-        attachmentId?: string;
-        size?: number;
-        data?: string;
-    };
-    parts?: GmailMessagePart[];
-}
-
-interface EmailContent {
-    text: string;
-    html: string;
-}
-
-// OAuth2 configuration
-let oauth2Client: OAuth2Client;
-let authorizedScopes: string[] = DEFAULT_SCOPES;
-
-/**
- * Recursively extract email body content from MIME message parts
- * Handles complex email structures with nested parts
- */
-function extractEmailContent(messagePart: GmailMessagePart): EmailContent {
-    // Initialize containers for different content types
-    let textContent = '';
-    let htmlContent = '';
-
-    // If the part has a body with data, process it based on MIME type
-    if (messagePart.body && messagePart.body.data) {
-        const content = Buffer.from(messagePart.body.data, 'base64').toString('utf8');
-
-        // Store content based on its MIME type
-        if (messagePart.mimeType === 'text/plain') {
-            textContent = content;
-        } else if (messagePart.mimeType === 'text/html') {
-            htmlContent = content;
-        }
-    }
-
-    // If the part has nested parts, recursively process them
-    if (messagePart.parts && messagePart.parts.length > 0) {
-        for (const part of messagePart.parts) {
-            const { text, html } = extractEmailContent(part);
-            if (text) textContent += text;
-            if (html) htmlContent += html;
-        }
-    }
-
-    // Return both plain text and HTML content
-    return { text: textContent, html: htmlContent };
-}
-
-/**
- * Extract common headers from Gmail message payload
- */
-function extractHeaders(payload: any): { subject: string; from: string; to: string; date: string; rfcMessageId: string; inReplyTo: string; references: string } {
-    const headers = payload?.headers || [];
-    const getHeader = (name: string) =>
-        headers.find((h: any) => h.name?.toLowerCase() === name.toLowerCase())?.value || "";
-    return {
-        subject: getHeader("subject"),
-        from: getHeader("from"),
-        to: getHeader("to"),
-        date: getHeader("date"),
-        rfcMessageId: getHeader("message-id"),
-        inReplyTo: getHeader("in-reply-to"),
-        references: getHeader("references"),
-    };
-}
-
-/**
- * Extract attachments from Gmail message payload
- */
-function extractAttachments(payload: GmailMessagePart): EmailAttachment[] {
-    const attachments: EmailAttachment[] = [];
-
-    function processAttachmentParts(part: GmailMessagePart) {
-        if (part.body && part.body.attachmentId) {
-            attachments.push({
-                id: part.body.attachmentId,
-                filename: part.filename || `attachment-${part.body.attachmentId}`,
-                mimeType: part.mimeType || "application/octet-stream",
-                size: part.body.size || 0,
-            });
-        }
-        if (part.parts) {
-            part.parts.forEach((subpart: GmailMessagePart) => processAttachmentParts(subpart));
-        }
-    }
-
-    processAttachmentParts(payload);
-    return attachments;
-}
-
-async function loadCredentials() {
-    try {
-        // Create config directory if it doesn't exist
-        if (!process.env.GMAIL_OAUTH_PATH && !process.env.GMAIL_CREDENTIALS_PATH && !fs.existsSync(CONFIG_DIR)) {
-            fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-        }
-
-        // Check for OAuth keys in current directory first, then in config directory
-        const localOAuthPath = path.join(process.cwd(), 'gcp-oauth.keys.json');
-        let oauthPath = OAUTH_PATH;
-
-        if (fs.existsSync(localOAuthPath)) {
-            // If found in current directory, copy to config directory
-            fs.copyFileSync(localOAuthPath, OAUTH_PATH);
-            console.log('OAuth keys found in current directory, copied to global config.');
-        }
-
-        if (!fs.existsSync(OAUTH_PATH)) {
-            console.error('Error: OAuth keys file not found. Please place gcp-oauth.keys.json in current directory or', CONFIG_DIR);
-            process.exit(1);
-        }
-
-        const keysContent = JSON.parse(fs.readFileSync(OAUTH_PATH, 'utf8'));
-        const keys = keysContent.installed || keysContent.web;
-
-        if (!keys) {
-            console.error('Error: Invalid OAuth keys file format. File should contain either "installed" or "web" credentials.');
-            process.exit(1);
-        }
-
-        // Parse callback URL from args (must be a URL, not a flag)
-        // Supports: node index.js auth https://example.com/callback
-        // Or: node index.js auth --scopes=gmail.readonly (uses default callback)
-        const callbackArg = process.argv.find(arg =>
-            arg.startsWith('http://') || arg.startsWith('https://')
-        );
-        const callback = callbackArg || "http://localhost:3000/oauth2callback";
-
-        oauth2Client = new OAuth2Client(
-            keys.client_id,
-            keys.client_secret,
-            callback
-        );
-
-        if (fs.existsSync(CREDENTIALS_PATH)) {
-            const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));
-
-            // Credentials file structure (v1.2.0+):
-            //   { "tokens": { access_token, refresh_token, ... }, "scopes": ["gmail.readonly", ...] }
-            //
-            // Legacy structure (pre-v1.2.0):
-            //   { access_token, refresh_token, ... }
-            //
-            // We support both formats for backwards compatibility. Users with legacy
-            // credentials will get DEFAULT_SCOPES (full access) until they re-authenticate.
-            const tokens = credentials.tokens || credentials;
-            oauth2Client.setCredentials(tokens);
-
-            if (credentials.scopes) {
-                authorizedScopes = credentials.scopes;
-            }
-        }
-    } catch (error) {
-        console.error('Error loading credentials:', error);
-        process.exit(1);
-    }
-}
-
-async function authenticate(scopes: string[]) {
-    const server = http.createServer();
-    server.listen(3000, '127.0.0.1');
-
-    // Convert shorthand scope names (e.g., "gmail.readonly") to full Google API URLs
-    const scopeUrls = scopeNamesToUrls(scopes);
-
-    return new Promise<void>((resolve, reject) => {
-        const authUrl = oauth2Client.generateAuthUrl({
-            access_type: 'offline',
-            scope: scopeUrls,
-        });
-
-        console.log('Requesting scopes:', scopes.join(', '));
-        console.log('Please visit this URL to authenticate:', authUrl);
-        open(authUrl);
-
-        server.on('request', async (req, res) => {
-            if (!req.url?.startsWith('/oauth2callback')) return;
-
-            const url = new URL(req.url, 'http://localhost:3000');
-            const code = url.searchParams.get('code');
-
-            if (!code) {
-                res.writeHead(400);
-                res.end('No code provided');
-                reject(new Error('No code provided'));
-                return;
-            }
-
-            try {
-                const { tokens } = await oauth2Client.getToken(code);
-                oauth2Client.setCredentials(tokens);
-
-                // Store both tokens and authorized scopes for runtime filtering
-                const credentials = { tokens, scopes };
-                fs.writeFileSync(CREDENTIALS_PATH, JSON.stringify(credentials, null, 2), { mode: 0o600 });
-
-                res.writeHead(200);
-                res.end('Authentication successful! You can close this window.');
-                console.log('Credentials saved with scopes:', scopes.join(', '));
-                server.close();
-                resolve();
-            } catch (error) {
-                res.writeHead(500);
-                res.end('Authentication failed');
-                reject(error);
-            }
-        });
-    });
-}
+// Gmail OAuth bootstrap, config paths (CREDENTIALS_PATH), response types
+// (GmailMessagePart/EmailContent), and MIME parsing helpers now live in
+// ./gmail-client.ts, shared with the channel entrypoint (channel.ts).
 
 // Main function
 async function main() {
@@ -286,7 +56,7 @@ async function main() {
     }
 
     // Initialize Gmail API
-    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    const gmail = getGmail();
 
     // Load the read-allowlist policy (Feature 2) for this account.
     const readAllowlist: Allowlist = loadAllowlist({
@@ -327,11 +97,19 @@ async function main() {
      * Read guard: returns a refusal content object if reading mail from
      * `fromHeader` is not permitted by the allowlist, or null if allowed.
      */
-    const readGuard = (fromHeader: string, context?: string) => {
-        if (isAllowed(fromHeader, readAllowlist)) return null;
-        return {
-            content: [{ type: "text" as const, text: blockedMessage(readAllowlist, context) }],
-        };
+    // Spoof-resistance: the allowlist matches the (forgeable) From header. When
+    // GMAIL_REQUIRE_AUTH is on, additionally require that the message passed DMARC,
+    // which verifies the From domain is authentic. Fail closed if the verdict is absent.
+    const requireAuth = /^(1|true|yes)$/i.test((process.env.GMAIL_REQUIRE_AUTH || '').trim());
+
+    const readGuard = (fromHeader: string, context?: string, payload?: GmailMessagePart) => {
+        if (!isAllowed(fromHeader, readAllowlist)) {
+            return { content: [{ type: "text" as const, text: blockedMessage(readAllowlist, context) }] };
+        }
+        if (requireAuth && !dmarcPassed(payload)) {
+            return { content: [{ type: "text" as const, text: `${context ?? 'This email'} could not be verified (DMARC did not pass) and may be spoofed, so it was withheld.` }] };
+        }
+        return null;
     };
 
     // Server implementation
@@ -351,7 +129,7 @@ async function main() {
     // Filter available tools based on authorized scopes
     server.setRequestHandler(ListToolsRequestSchema, async () => {
         const availableTools = toolDefinitions.filter(tool =>
-            hasScope(authorizedScopes, tool.scopes) &&
+            hasScope(getAuthorizedScopes(), tool.scopes) &&
             (writeToolsEnabled || isReadOnlyTool(tool))
         );
         return { tools: toMcpTools(availableTools) };
@@ -363,7 +141,7 @@ async function main() {
         // Verify the tool is authorized for the current scopes
         // This guards against direct tool calls that bypass ListTools
         const toolDef = getToolByName(name);
-        if (!toolDef || !hasScope(authorizedScopes, toolDef.scopes)) {
+        if (!toolDef || !hasScope(getAuthorizedScopes(), toolDef.scopes)) {
             return {
                 content: [{
                     type: "text",
@@ -607,7 +385,7 @@ async function main() {
                     const { subject, from, to, date, rfcMessageId, inReplyTo, references } = extractHeaders(response.data.payload);
 
                     // Allowlist guard: never surface mail from untrusted senders.
-                    const readBlock = readGuard(from, 'This email');
+                    const readBlock = readGuard(from, 'This email', response.data.payload as GmailMessagePart);
                     if (readBlock) return readBlock;
 
                     const threadId = response.data.threadId || '';
@@ -658,7 +436,7 @@ async function main() {
                                 userId: 'me',
                                 id: msg.id!,
                                 format: 'metadata',
-                                metadataHeaders: ['Subject', 'From', 'Date'],
+                                metadataHeaders: ['Subject', 'From', 'Date', 'Authentication-Results'],
                             });
                             const headers = detail.data.payload?.headers || [];
                             return {
@@ -666,11 +444,13 @@ async function main() {
                                 subject: headers.find(h => h.name === 'Subject')?.value || '',
                                 from: headers.find(h => h.name === 'From')?.value || '',
                                 date: headers.find(h => h.name === 'Date')?.value || '',
+                                authed: dmarcPassed(detail.data.payload as GmailMessagePart),
                             };
                         })
                     );
-                    // Post-filter: drop anything whose sender is not allowlisted.
-                    const results = allResults.filter(r => isAllowed(r.from, readAllowlist));
+                    // Post-filter: drop anything whose sender is not allowlisted (and, when
+                    // GMAIL_REQUIRE_AUTH is on, anything that didn't pass DMARC).
+                    const results = allResults.filter(r => isAllowed(r.from, readAllowlist) && (!requireAuth || r.authed));
 
                     return {
                         content: [
@@ -704,7 +484,7 @@ async function main() {
                         const { subject, from, date } = extractHeaders(fullResponse.data.payload);
 
                         // Allowlist guard: do not write untrusted mail to disk.
-                        const dlBlock = readGuard(from, 'This email');
+                        const dlBlock = readGuard(from, 'This email', fullResponse.data.payload as GmailMessagePart);
                         if (dlBlock) return dlBlock;
 
                         const attachments = extractAttachments(fullResponse.data.payload as GmailMessagePart);
@@ -1179,11 +959,11 @@ async function main() {
                             userId: 'me',
                             id: validatedArgs.messageId,
                             format: 'metadata',
-                            metadataHeaders: ['From'],
+                            metadataHeaders: ['From', 'Authentication-Results'],
                         });
                         const attFrom = senderMeta.data.payload?.headers
                             ?.find(h => h.name?.toLowerCase() === 'from')?.value || '';
-                        const attBlock = readGuard(attFrom, 'This attachment');
+                        const attBlock = readGuard(attFrom, 'This attachment', senderMeta.data.payload as GmailMessagePart);
                         if (attBlock) return attBlock;
 
                         // Get the attachment data from Gmail API
@@ -1333,7 +1113,9 @@ async function main() {
                     });
 
                     // Allowlist guard: only surface messages from trusted senders.
-                    const visibleMessages = messagesOutput.filter(m => isAllowed(m.from, readAllowlist));
+                    // When GMAIL_REQUIRE_AUTH is on, also require DMARC pass (from the raw payloads).
+                    const authedIds = new Set(threadMessages.filter(msg => msg.id && dmarcPassed(msg.payload as GmailMessagePart)).map(msg => msg.id!));
+                    const visibleMessages = messagesOutput.filter(m => isAllowed(m.from, readAllowlist) && (!requireAuth || authedIds.has(m.messageId)));
                     const withheldCount = messagesOutput.length - visibleMessages.length;
 
                     return {
@@ -1368,7 +1150,7 @@ async function main() {
                                 userId: 'me',
                                 id: thread.id!,
                                 format: 'metadata',
-                                metadataHeaders: ['Subject', 'From', 'Date'],
+                                metadataHeaders: ['Subject', 'From', 'Date', 'Authentication-Results'],
                             });
 
                             const messages = detail.data.messages || [];
@@ -1376,6 +1158,7 @@ async function main() {
                             const latestHeaders = latestMessage?.payload?.headers || [];
 
                             return {
+                                _authed: dmarcPassed(latestMessage?.payload as GmailMessagePart),
                                 threadId: thread.id || '',
                                 snippet: thread.snippet || '',
                                 historyId: thread.historyId || '',
@@ -1389,8 +1172,11 @@ async function main() {
                         })
                     );
 
-                    // Allowlist guard: only surface threads whose latest sender is trusted.
-                    const visibleThreads = threadDetails.filter(t => isAllowed(t.latestMessage.from, readAllowlist));
+                    // Allowlist guard: only surface threads whose latest sender is trusted
+                    // (and, when GMAIL_REQUIRE_AUTH is on, whose latest message passed DMARC).
+                    const visibleThreads = threadDetails
+                        .filter(t => isAllowed(t.latestMessage.from, readAllowlist) && (!requireAuth || t._authed))
+                        .map(({ _authed, ...t }) => t);
 
                     return {
                         content: [
@@ -1423,7 +1209,7 @@ async function main() {
                                     userId: 'me',
                                     id: thread.id!,
                                     format: 'metadata',
-                                    metadataHeaders: ['Subject', 'From', 'Date'],
+                                    metadataHeaders: ['Subject', 'From', 'Date', 'Authentication-Results'],
                                 });
 
                                 const messages = detail.data.messages || [];
@@ -1431,6 +1217,7 @@ async function main() {
                                 const latestHeaders = latestMessage?.payload?.headers || [];
 
                                 return {
+                                    _authed: dmarcPassed(latestMessage?.payload as GmailMessagePart),
                                     threadId: thread.id || '',
                                     snippet: thread.snippet || '',
                                     historyId: thread.historyId || '',
@@ -1444,8 +1231,11 @@ async function main() {
                             })
                         );
 
-                        // Allowlist guard: only surface threads whose latest sender is trusted.
-                        const visibleSummaries = threadSummaries.filter(t => isAllowed(t.latestMessage.from, readAllowlist));
+                        // Allowlist guard: only surface threads whose latest sender is trusted
+                        // (and, when GMAIL_REQUIRE_AUTH is on, whose latest message passed DMARC).
+                        const visibleSummaries = threadSummaries
+                            .filter(t => isAllowed(t.latestMessage.from, readAllowlist) && (!requireAuth || t._authed))
+                            .map(({ _authed, ...t }) => t);
 
                         return {
                             content: [
@@ -1523,7 +1313,8 @@ async function main() {
                             });
 
                             // Allowlist guard: keep only messages from trusted senders.
-                            const visible = messages.filter(m => isAllowed(m.from, readAllowlist));
+                            const authedIds = new Set(threadMessages.filter(msg => msg.id && dmarcPassed(msg.payload as GmailMessagePart)).map(msg => msg.id!));
+                            const visible = messages.filter(m => isAllowed(m.from, readAllowlist) && (!requireAuth || authedIds.has(m.messageId)));
 
                             return {
                                 threadId: thread.id || '',

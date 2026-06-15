@@ -146,14 +146,35 @@ export function authResults(payload: GmailMessagePart | undefined): string {
         .join(" ; ");
 }
 
+// The receiving server's authserv-id. Only an `Authentication-Results` header
+// stamped with this id is trustworthy: per RFC 7601 §5 the receiver strips inbound
+// A-R headers bearing its OWN id before adding its verdict, so an attacker cannot
+// forge one with this id — but they CAN add a header under any other id. Gmail
+// (incl. Workspace) uses "mx.google.com"; override only if a different MTA delivers.
+const TRUSTED_AUTHSERV_ID = (process.env.GMAIL_AUTHSERV_ID || "mx.google.com").toLowerCase();
+
 /**
  * True if the receiving server's verdict shows DMARC passed. DMARC requires the
  * authenticated SPF/DKIM domain to align with the `From:` header domain, so a pass
- * means the From address wasn't spoofed. Absence of the header (or any non-pass)
- * is treated as a failure — fail closed.
+ * means the From address wasn't spoofed.
+ *
+ * Only the `Authentication-Results` header whose authserv-id matches the trusted
+ * receiver is considered — a `dmarc=pass` an attacker injected under a different
+ * authserv-id is ignored. Absence of a trusted passing verdict is a failure
+ * (fail closed).
  */
 export function dmarcPassed(payload: GmailMessagePart | undefined): boolean {
-    return /\bdmarc=pass\b/.test(authResults(payload));
+    const headers = payload?.headers ?? [];
+    for (const h of headers) {
+        if (h.name?.toLowerCase() !== "authentication-results") continue;
+        const value = (h.value ?? "").trim().toLowerCase();
+        // authserv-id is the first token, before an optional version and the first ';'
+        // (RFC 7601 §2.2). Ignore headers not stamped by the trusted receiver.
+        const authservId = value.split(";")[0].trim().split(/\s+/)[0];
+        if (authservId !== TRUSTED_AUTHSERV_ID) continue;
+        if (/\bdmarc=pass\b/.test(value)) return true;
+    }
+    return false;
 }
 
 export async function loadCredentials() {

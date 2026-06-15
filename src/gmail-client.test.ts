@@ -26,19 +26,29 @@ describe('dmarcPassed (spoof defense)', () => {
     });
 
     it('is case-insensitive (phones/relays may uppercase)', () => {
-        expect(dmarcPassed(payload('DMARC=PASS header.from=gmail.com'))).toBe(true);
+        expect(dmarcPassed(payload('mx.google.com; DMARC=PASS header.from=gmail.com'))).toBe(true);
     });
 
     it('does not match on substrings (dmarc=passing, dmarc=passerror)', () => {
-        expect(dmarcPassed(payload('dmarc=passerror header.from=evil.com'))).toBe(false);
-        expect(dmarcPassed(payload('dmarc=passing'))).toBe(false);
+        expect(dmarcPassed(payload('mx.google.com; dmarc=passerror header.from=evil.com'))).toBe(false);
+        expect(dmarcPassed(payload('mx.google.com; dmarc=passing'))).toBe(false);
     });
 
-    it('considers multiple Authentication-Results headers', () => {
+    it('only trusts the verdict stamped by the receiving server (mx.google.com)', () => {
         expect(dmarcPassed(payload(
             'relay.example.com; dmarc=none',
             'mx.google.com; dmarc=pass header.from=gmail.com'
         ))).toBe(true);
+    });
+
+    it('ignores a forged dmarc=pass stamped with a non-Gmail authserv-id', () => {
+        // Attacker injects their own Authentication-Results header; Gmail's real verdict failed.
+        expect(dmarcPassed(payload(
+            'evil.example.com; dmarc=pass header.from=trusted.com',
+            'mx.google.com; spf=fail; dmarc=fail header.from=trusted.com'
+        ))).toBe(false);
+        // A pass under an untrusted authserv-id, with no Gmail verdict at all, is not enough.
+        expect(dmarcPassed(payload('relay.example.com; dmarc=pass'))).toBe(false);
     });
 
     it('authResults joins and lowercases the header values', () => {

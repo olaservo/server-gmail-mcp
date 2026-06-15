@@ -27,6 +27,8 @@
  *   GMAIL_CHANNEL_REQUIRE_AUTH       if truthy, only push mail whose From domain
  *                                    passed DMARC (defeats From-header spoofing);
  *                                    fail-closed if the auth verdict is missing
+ *   GMAIL_AUTHSERV_ID                receiving server's authserv-id whose DMARC
+ *                                    verdict is trusted (default "mx.google.com")
  *   GMAIL_CHANNEL_STATE_PATH         where to persist handled message IDs so a
  *                                    restart resumes instead of re-seeding;
  *                                    default ~/.gmail-mcp/channel-seen-<labelId>.json
@@ -53,8 +55,12 @@ import { findLabelByName } from "./label-manager.js";
 import { loadAllowlist, isAllowed, parseAllowlistEntries, Allowlist } from "./allowlist.js";
 
 const LABEL = (process.env.GMAIL_CHANNEL_LABEL ?? "").trim();
-const POLL_SECONDS = Number(process.env.GMAIL_CHANNEL_POLL_SECONDS ?? "30");
-const MAX_RESULTS = Number(process.env.GMAIL_CHANNEL_MAX ?? "25");
+// Clamp to sane ranges so a bad/non-numeric env value can't busy-loop the poller
+// (setInterval(NaN)) or set MAX_RESULTS at/above SEEN_CAP (which would let pruning
+// evict a still-visible id and re-push it). `Number(undefined)` is NaN, and `NaN || x`
+// falls back to the default.
+const POLL_SECONDS = Math.max(5, Number(process.env.GMAIL_CHANNEL_POLL_SECONDS) || 30);
+const MAX_RESULTS = Math.min(100, Math.max(1, Number(process.env.GMAIL_CHANNEL_MAX) || 25));
 const REQUIRE_ALLOWLIST = /^(1|true|yes)$/i.test((process.env.GMAIL_CHANNEL_REQUIRE_ALLOWLIST ?? "").trim());
 const ALLOWED_SENDERS = (process.env.GMAIL_CHANNEL_ALLOWED_SENDERS ?? "").trim();
 const REQUIRE_AUTH = /^(1|true|yes)$/i.test((process.env.GMAIL_CHANNEL_REQUIRE_AUTH ?? "").trim());
@@ -190,9 +196,14 @@ async function main() {
         let dirty = false;
         for (const { id } of messages) {
             if (!id || seen.has(id)) continue;
-            seen.add(id);
-            dirty = true;
-            if (!primed) continue; // first pass with no prior state = seed only
+
+            if (!primed) {
+                // Seed pass (no prior state): record without pushing, so we don't
+                // dump the pre-existing backlog.
+                seen.add(id);
+                dirty = true;
+                continue;
+            }
 
             const full = await gmail.users.messages.get({ userId: "me", id, format: "full" });
             const payload = full.data.payload as GmailMessagePart | undefined;
@@ -200,12 +211,14 @@ async function main() {
 
             if (senderGate && !isAllowed(h.from, senderGate)) {
                 log(`dropped message ${id} from non-allowlisted sender: ${h.from}`);
+                seen.add(id); dirty = true; // terminal decision — don't reconsider it
                 continue;
             }
 
             // The allowlist matches the (forgeable) From header; DMARC verifies it.
             if (REQUIRE_AUTH && !dmarcPassed(payload)) {
                 log(`dropped message ${id}: DMARC did not pass (possible spoof of ${h.from})`);
+                seen.add(id); dirty = true;
                 continue;
             }
 
@@ -228,11 +241,15 @@ async function main() {
                     },
                 },
             });
+            // Mark handled only after a successful push, so a failed fetch/notification
+            // leaves the message un-seen and it is retried on the next poll.
+            seen.add(id);
+            dirty = true;
             log(`pushed message ${id} (${h.subject})`);
         }
 
         primed = true;
-        if (dirty) saveSeen(); // persist baseline (seed pass) and every new arrival
+        if (dirty) saveSeen(); // persist seeded baseline, terminal drops, and delivered arrivals
     }
 
     const tick = () => poll().catch(e => log(`poll error: ${e?.message ?? e}`));

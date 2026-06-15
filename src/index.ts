@@ -6,25 +6,17 @@ import {
     CallToolRequestSchema,
     ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { google } from 'googleapis';
-import { OAuth2Client } from 'google-auth-library';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
-import http from 'http';
-import open from 'open';
-import os from 'os';
 import {createEmailMessage, createEmailWithNodemailer} from "./utl.js";
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
-import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
+import { DEFAULT_SCOPES, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
 import { toolDefinitions, toMcpTools, getToolByName, isReadOnlyTool, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 import { loadAllowlist, isAllowed, allowlistToFromQuery, combineQuery, blockedMessage, Allowlist } from "./allowlist.js";
 import { CREDENTIALS_PATH, loadCredentials, authenticate, getGmail, getAuthorizedScopes, extractEmailContent, extractHeaders, extractAttachments, dmarcPassed, GmailMessagePart, EmailContent } from "./gmail-client.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Gmail OAuth bootstrap, config paths (CREDENTIALS_PATH), response types
 // (GmailMessagePart/EmailContent), and MIME parsing helpers now live in
@@ -1122,7 +1114,7 @@ async function main() {
 
                     // Allowlist guard: only surface messages from trusted senders.
                     // When GMAIL_REQUIRE_AUTH is on, also require DMARC pass (from the raw payloads).
-                    const authedIds = new Set(threadMessages.filter(msg => dmarcPassed(msg.payload as GmailMessagePart)).map(msg => msg.id || ''));
+                    const authedIds = new Set(threadMessages.filter(msg => msg.id && dmarcPassed(msg.payload as GmailMessagePart)).map(msg => msg.id!));
                     const visibleMessages = messagesOutput.filter(m => isAllowed(m.from, readAllowlist) && (!requireAuth || authedIds.has(m.messageId)));
                     const withheldCount = messagesOutput.length - visibleMessages.length;
 
@@ -1321,7 +1313,7 @@ async function main() {
                             });
 
                             // Allowlist guard: keep only messages from trusted senders.
-                            const authedIds = new Set(threadMessages.filter(msg => dmarcPassed(msg.payload as GmailMessagePart)).map(msg => msg.id || ''));
+                            const authedIds = new Set(threadMessages.filter(msg => msg.id && dmarcPassed(msg.payload as GmailMessagePart)).map(msg => msg.id!));
                             const visible = messages.filter(m => isAllowed(m.from, readAllowlist) && (!requireAuth || authedIds.has(m.messageId)));
 
                             return {

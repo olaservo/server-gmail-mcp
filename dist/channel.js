@@ -24,6 +24,9 @@
  *   GMAIL_CHANNEL_REQUIRE_ALLOWLIST  if truthy, also fold in the shared read-allowlist
  *                                    file/env the tool server uses (GMAIL_READ_ALLOWLIST
  *                                    / GMAIL_ALLOWLIST_PATH)
+ *   GMAIL_CHANNEL_REQUIRE_AUTH       if truthy, only push mail whose From domain
+ *                                    passed DMARC (defeats From-header spoofing);
+ *                                    fail-closed if the auth verdict is missing
  *   GMAIL_CHANNEL_STATE_PATH         where to persist handled message IDs so a
  *                                    restart resumes instead of re-seeding;
  *                                    default ~/.gmail-mcp/channel-seen-<labelId>.json
@@ -35,7 +38,7 @@ import fs from "fs";
 import path from "path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CONFIG_DIR, CREDENTIALS_PATH, loadCredentials, getGmail, extractHeaders, extractEmailContent, } from "./gmail-client.js";
+import { CONFIG_DIR, CREDENTIALS_PATH, loadCredentials, getGmail, extractHeaders, extractEmailContent, dmarcPassed, } from "./gmail-client.js";
 import { findLabelByName } from "./label-manager.js";
 import { loadAllowlist, isAllowed, parseAllowlistEntries } from "./allowlist.js";
 const LABEL = (process.env.GMAIL_CHANNEL_LABEL ?? "").trim();
@@ -43,6 +46,7 @@ const POLL_SECONDS = Number(process.env.GMAIL_CHANNEL_POLL_SECONDS ?? "30");
 const MAX_RESULTS = Number(process.env.GMAIL_CHANNEL_MAX ?? "25");
 const REQUIRE_ALLOWLIST = /^(1|true|yes)$/i.test((process.env.GMAIL_CHANNEL_REQUIRE_ALLOWLIST ?? "").trim());
 const ALLOWED_SENDERS = (process.env.GMAIL_CHANNEL_ALLOWED_SENDERS ?? "").trim();
+const REQUIRE_AUTH = /^(1|true|yes)$/i.test((process.env.GMAIL_CHANNEL_REQUIRE_AUTH ?? "").trim());
 // All diagnostics go to stderr: stdout is the MCP transport.
 function log(msg) {
     process.stderr.write(`gmail-channel: ${msg}\n`);
@@ -174,6 +178,11 @@ async function main() {
             const h = extractHeaders(payload);
             if (senderGate && !isAllowed(h.from, senderGate)) {
                 log(`dropped message ${id} from non-allowlisted sender: ${h.from}`);
+                continue;
+            }
+            // The allowlist matches the (forgeable) From header; DMARC verifies it.
+            if (REQUIRE_AUTH && !dmarcPassed(payload)) {
+                log(`dropped message ${id}: DMARC did not pass (possible spoof of ${h.from})`);
                 continue;
             }
             const { text, html } = extractEmailContent(payload ?? {});

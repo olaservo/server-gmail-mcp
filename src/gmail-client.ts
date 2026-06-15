@@ -137,6 +137,25 @@ export function extractAttachments(payload: GmailMessagePart): EmailAttachment[]
     return attachments;
 }
 
+/** All `Authentication-Results` header values for a message, lowercased and joined. */
+export function authResults(payload: GmailMessagePart | undefined): string {
+    const headers = payload?.headers ?? [];
+    return headers
+        .filter(h => h.name?.toLowerCase() === "authentication-results")
+        .map(h => (h.value ?? "").toLowerCase())
+        .join(" ; ");
+}
+
+/**
+ * True if the receiving server's verdict shows DMARC passed. DMARC requires the
+ * authenticated SPF/DKIM domain to align with the `From:` header domain, so a pass
+ * means the From address wasn't spoofed. Absence of the header (or any non-pass)
+ * is treated as a failure — fail closed.
+ */
+export function dmarcPassed(payload: GmailMessagePart | undefined): boolean {
+    return /\bdmarc=pass\b/.test(authResults(payload));
+}
+
 export async function loadCredentials() {
     try {
         // Create config directory if it doesn't exist

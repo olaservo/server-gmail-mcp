@@ -13,7 +13,7 @@ import { DEFAULT_SCOPES, parseScopes, validateScopes, hasScope, getAvailableScop
 import { toolDefinitions, toMcpTools, getToolByName, isReadOnlyTool, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml } from "./email-export.js";
 import { loadAllowlist, isAllowed, allowlistToFromQuery, combineQuery, blockedMessage } from "./allowlist.js";
-import { CREDENTIALS_PATH, loadCredentials, authenticate, getGmail, getAuthorizedScopes, extractEmailContent, extractHeaders, extractAttachments } from "./gmail-client.js";
+import { CREDENTIALS_PATH, loadCredentials, authenticate, getGmail, getAuthorizedScopes, extractEmailContent, extractHeaders, extractAttachments, dmarcPassed } from "./gmail-client.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Gmail OAuth bootstrap, config paths (CREDENTIALS_PATH), response types
 // (GmailMessagePart/EmailContent), and MIME parsing helpers now live in
@@ -83,12 +83,18 @@ async function main() {
      * Read guard: returns a refusal content object if reading mail from
      * `fromHeader` is not permitted by the allowlist, or null if allowed.
      */
-    const readGuard = (fromHeader, context) => {
-        if (isAllowed(fromHeader, readAllowlist))
-            return null;
-        return {
-            content: [{ type: "text", text: blockedMessage(readAllowlist, context) }],
-        };
+    // Spoof-resistance: the allowlist matches the (forgeable) From header. When
+    // GMAIL_REQUIRE_AUTH is on, additionally require that the message passed DMARC,
+    // which verifies the From domain is authentic. Fail closed if the verdict is absent.
+    const requireAuth = /^(1|true|yes)$/i.test((process.env.GMAIL_REQUIRE_AUTH || '').trim());
+    const readGuard = (fromHeader, context, payload) => {
+        if (!isAllowed(fromHeader, readAllowlist)) {
+            return { content: [{ type: "text", text: blockedMessage(readAllowlist, context) }] };
+        }
+        if (requireAuth && !dmarcPassed(payload)) {
+            return { content: [{ type: "text", text: `${context ?? 'This email'} could not be verified (DMARC did not pass) and may be spoofed, so it was withheld.` }] };
+        }
+        return null;
     };
     // Server implementation
     const server = new Server({
@@ -324,7 +330,7 @@ async function main() {
                     });
                     const { subject, from, to, date, rfcMessageId, inReplyTo, references } = extractHeaders(response.data.payload);
                     // Allowlist guard: never surface mail from untrusted senders.
-                    const readBlock = readGuard(from, 'This email');
+                    const readBlock = readGuard(from, 'This email', response.data.payload);
                     if (readBlock)
                         return readBlock;
                     const threadId = response.data.threadId || '';
@@ -367,7 +373,7 @@ async function main() {
                             userId: 'me',
                             id: msg.id,
                             format: 'metadata',
-                            metadataHeaders: ['Subject', 'From', 'Date'],
+                            metadataHeaders: ['Subject', 'From', 'Date', 'Authentication-Results'],
                         });
                         const headers = detail.data.payload?.headers || [];
                         return {
@@ -375,10 +381,12 @@ async function main() {
                             subject: headers.find(h => h.name === 'Subject')?.value || '',
                             from: headers.find(h => h.name === 'From')?.value || '',
                             date: headers.find(h => h.name === 'Date')?.value || '',
+                            authed: dmarcPassed(detail.data.payload),
                         };
                     }));
-                    // Post-filter: drop anything whose sender is not allowlisted.
-                    const results = allResults.filter(r => isAllowed(r.from, readAllowlist));
+                    // Post-filter: drop anything whose sender is not allowlisted (and, when
+                    // GMAIL_REQUIRE_AUTH is on, anything that didn't pass DMARC).
+                    const results = allResults.filter(r => isAllowed(r.from, readAllowlist) && (!requireAuth || r.authed));
                     return {
                         content: [
                             {
@@ -404,7 +412,7 @@ async function main() {
                         });
                         const { subject, from, date } = extractHeaders(fullResponse.data.payload);
                         // Allowlist guard: do not write untrusted mail to disk.
-                        const dlBlock = readGuard(from, 'This email');
+                        const dlBlock = readGuard(from, 'This email', fullResponse.data.payload);
                         if (dlBlock)
                             return dlBlock;
                         const attachments = extractAttachments(fullResponse.data.payload);
@@ -813,11 +821,11 @@ async function main() {
                             userId: 'me',
                             id: validatedArgs.messageId,
                             format: 'metadata',
-                            metadataHeaders: ['From'],
+                            metadataHeaders: ['From', 'Authentication-Results'],
                         });
                         const attFrom = senderMeta.data.payload?.headers
                             ?.find(h => h.name?.toLowerCase() === 'from')?.value || '';
-                        const attBlock = readGuard(attFrom, 'This attachment');
+                        const attBlock = readGuard(attFrom, 'This attachment', senderMeta.data.payload);
                         if (attBlock)
                             return attBlock;
                         // Get the attachment data from Gmail API
@@ -952,7 +960,9 @@ async function main() {
                         };
                     });
                     // Allowlist guard: only surface messages from trusted senders.
-                    const visibleMessages = messagesOutput.filter(m => isAllowed(m.from, readAllowlist));
+                    // When GMAIL_REQUIRE_AUTH is on, also require DMARC pass (from the raw payloads).
+                    const authedIds = new Set(threadMessages.filter(msg => dmarcPassed(msg.payload)).map(msg => msg.id || ''));
+                    const visibleMessages = messagesOutput.filter(m => isAllowed(m.from, readAllowlist) && (!requireAuth || authedIds.has(m.messageId)));
                     const withheldCount = messagesOutput.length - visibleMessages.length;
                     return {
                         content: [
@@ -982,12 +992,13 @@ async function main() {
                             userId: 'me',
                             id: thread.id,
                             format: 'metadata',
-                            metadataHeaders: ['Subject', 'From', 'Date'],
+                            metadataHeaders: ['Subject', 'From', 'Date', 'Authentication-Results'],
                         });
                         const messages = detail.data.messages || [];
                         const latestMessage = messages[messages.length - 1];
                         const latestHeaders = latestMessage?.payload?.headers || [];
                         return {
+                            _authed: dmarcPassed(latestMessage?.payload),
                             threadId: thread.id || '',
                             snippet: thread.snippet || '',
                             historyId: thread.historyId || '',
@@ -999,8 +1010,11 @@ async function main() {
                             },
                         };
                     }));
-                    // Allowlist guard: only surface threads whose latest sender is trusted.
-                    const visibleThreads = threadDetails.filter(t => isAllowed(t.latestMessage.from, readAllowlist));
+                    // Allowlist guard: only surface threads whose latest sender is trusted
+                    // (and, when GMAIL_REQUIRE_AUTH is on, whose latest message passed DMARC).
+                    const visibleThreads = threadDetails
+                        .filter(t => isAllowed(t.latestMessage.from, readAllowlist) && (!requireAuth || t._authed))
+                        .map(({ _authed, ...t }) => t);
                     return {
                         content: [
                             {
@@ -1028,12 +1042,13 @@ async function main() {
                                 userId: 'me',
                                 id: thread.id,
                                 format: 'metadata',
-                                metadataHeaders: ['Subject', 'From', 'Date'],
+                                metadataHeaders: ['Subject', 'From', 'Date', 'Authentication-Results'],
                             });
                             const messages = detail.data.messages || [];
                             const latestMessage = messages[messages.length - 1];
                             const latestHeaders = latestMessage?.payload?.headers || [];
                             return {
+                                _authed: dmarcPassed(latestMessage?.payload),
                                 threadId: thread.id || '',
                                 snippet: thread.snippet || '',
                                 historyId: thread.historyId || '',
@@ -1045,8 +1060,11 @@ async function main() {
                                 },
                             };
                         }));
-                        // Allowlist guard: only surface threads whose latest sender is trusted.
-                        const visibleSummaries = threadSummaries.filter(t => isAllowed(t.latestMessage.from, readAllowlist));
+                        // Allowlist guard: only surface threads whose latest sender is trusted
+                        // (and, when GMAIL_REQUIRE_AUTH is on, whose latest message passed DMARC).
+                        const visibleSummaries = threadSummaries
+                            .filter(t => isAllowed(t.latestMessage.from, readAllowlist) && (!requireAuth || t._authed))
+                            .map(({ _authed, ...t }) => t);
                         return {
                             content: [
                                 {
@@ -1115,7 +1133,8 @@ async function main() {
                             };
                         });
                         // Allowlist guard: keep only messages from trusted senders.
-                        const visible = messages.filter(m => isAllowed(m.from, readAllowlist));
+                        const authedIds = new Set(threadMessages.filter(msg => dmarcPassed(msg.payload)).map(msg => msg.id || ''));
+                        const visible = messages.filter(m => isAllowed(m.from, readAllowlist) && (!requireAuth || authedIds.has(m.messageId)));
                         return {
                             threadId: thread.id || '',
                             messageCount: visible.length,

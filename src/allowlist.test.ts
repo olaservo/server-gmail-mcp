@@ -179,18 +179,22 @@ describe('Source verification: read paths are gated', () => {
     const indexSource = fs.readFileSync(path.join(__dirname, 'index.ts'), 'utf-8');
 
     it('read_email is guarded', () => {
-        expect(indexSource).toContain("readGuard(from, 'This email')");
+        expect(indexSource).toContain("readGuard(from, 'This email',");
     });
     it('search_emails injects the from-clause and post-filters', () => {
         expect(indexSource).toContain('allowlistToFromQuery(readAllowlist)');
-        expect(indexSource).toContain('allResults.filter(r => isAllowed(r.from, readAllowlist))');
+        expect(indexSource).toContain('allResults.filter(r => isAllowed(r.from, readAllowlist) && (!requireAuth || r.authed))');
     });
     it('download_attachment resolves and gates the sender', () => {
-        expect(indexSource).toContain("readGuard(attFrom, 'This attachment')");
+        expect(indexSource).toContain("readGuard(attFrom, 'This attachment',");
     });
     it('thread tools filter by sender', () => {
-        expect(indexSource).toContain('messagesOutput.filter(m => isAllowed(m.from, readAllowlist))');
+        expect(indexSource).toContain('messagesOutput.filter(m => isAllowed(m.from, readAllowlist) && (!requireAuth || authedIds.has(m.messageId)))');
         expect(indexSource).toContain('isAllowed(t.latestMessage.from, readAllowlist)');
+    });
+    it('read paths additionally enforce DMARC when GMAIL_REQUIRE_AUTH is set', () => {
+        expect(indexSource).toContain('GMAIL_REQUIRE_AUTH');
+        expect(indexSource).toContain('dmarcPassed(');
     });
     it('the account self-address is always trusted', () => {
         expect(indexSource).toContain('readAllowlist.addresses.add(profile.data.emailAddress.toLowerCase())');

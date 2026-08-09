@@ -535,6 +535,7 @@ async function main() {
                         };
                     } catch (error: any) {
                         return {
+                            isError: true,
                             content: [
                                 {
                                     type: "text",
@@ -1029,6 +1030,7 @@ async function main() {
                         };
                     } catch (error: any) {
                         return {
+                            isError: true,
                             content: [
                                 {
                                     type: "text",

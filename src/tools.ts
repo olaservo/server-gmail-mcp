@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
+import type { Tool } from "@modelcontextprotocol/server";
 
 // Schema definitions
 export const SendEmailSchema = z.object({
@@ -359,14 +359,18 @@ export const toolDefinitions: ToolDefinition[] = [
   },
 ];
 
-// Convert tool definitions to MCP tool format
-export function toMcpTools(tools: ToolDefinition[]) {
+// Convert tool definitions to MCP tool format.
+// Zod 4 emits JSON Schema natively; `io: 'input'` describes what a caller sends
+// (fields with .default() stay optional) and draft-2020-12 is the dialect the
+// 2025-11-25+ spec advertises for tool inputSchema.
+export function toMcpTools(tools: ToolDefinition[]): Tool[] {
   return tools.map(tool => ({
     name: tool.name,
     description: tool.description,
-    // Cast to any: zod 3.25 + TS 5.9 otherwise hit TS2589 (excessively deep type
-    // instantiation) on the union of schema types. Runtime behaviour is unchanged.
-    inputSchema: zodToJsonSchema(tool.schema as any),
+    inputSchema: z.toJSONSchema(tool.schema, {
+      io: "input",
+      target: "draft-2020-12",
+    }) as Tool["inputSchema"],
     annotations: tool.annotations,
   }));
 }

@@ -1,11 +1,8 @@
 #!/usr/bin/env node
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-    CallToolRequestSchema,
-    ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import { Server } from "@modelcontextprotocol/server";
+import type { CallToolRequest, CallToolResult, ListToolsResult } from "@modelcontextprotocol/server";
 import fs from 'fs';
 import path from 'path';
 import {createEmailMessage, createEmailWithNodemailer} from "./utl.js";
@@ -112,30 +109,18 @@ async function main() {
         return null;
     };
 
-    // Server implementation
-    const server = new Server(
-        {
-            name: "gmail",
-            version: "1.0.0",
-        },
-        {
-            capabilities: {
-                tools: {},
-            },
-        },
-    );
-
-    // Tool handlers
+    // Tool handlers, declared once and registered on every server instance
+    // serveStdio builds (see buildServer below).
     // Filter available tools based on authorized scopes
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const listToolsHandler = async (): Promise<ListToolsResult> => {
         const availableTools = toolDefinitions.filter(tool =>
             hasScope(getAuthorizedScopes(), tool.scopes) &&
             (writeToolsEnabled || isReadOnlyTool(tool))
         );
         return { tools: toMcpTools(availableTools) };
-    });
+    };
 
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const callToolHandler = async (request: CallToolRequest): Promise<CallToolResult> => {
         const { name, arguments: args } = request.params;
 
         // Verify the tool is authorized for the current scopes
@@ -160,7 +145,7 @@ async function main() {
             };
         }
 
-        async function handleEmailAction(action: "send" | "draft", validatedArgs: any) {
+        async function handleEmailAction(action: "send" | "draft", validatedArgs: any): Promise<CallToolResult> {
             let message: string;
 
             try {
@@ -1424,10 +1409,41 @@ async function main() {
                 ],
             };
         }
+    };
+
+    // One instance per connection, built by serveStdio. The factory must be cheap
+    // and side-effect-free: serveStdio may call it twice on a connection that
+    // probes for the 2026-07-28 era and then falls back to the 2025 handshake.
+    // All the expensive setup (OAuth, allowlist, profile lookup) already ran above.
+    const buildServer = () => {
+        const server = new Server(
+            {
+                name: "gmail",
+                version: "1.0.0",
+            },
+            {
+                capabilities: {
+                    tools: {},
+                },
+            },
+        );
+        server.setRequestHandler('tools/list', listToolsHandler);
+        server.setRequestHandler('tools/call', callToolHandler);
+        return server;
+    };
+
+    // serveStdio owns the transport and pins the connection's protocol era:
+    // 2026-07-28 for clients that open with a modern per-request _meta envelope,
+    // and the 2025-era initialize handshake for everyone else (legacy: 'serve').
+    const handle = serveStdio(buildServer, {
+        onerror: (error) => console.error('Server error:', error),
     });
 
-    const transport = new StdioServerTransport();
-    server.connect(transport);
+    const shutdown = () => {
+        void handle.close().finally(() => process.exit(0));
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
 }
 
 main().catch((error) => {

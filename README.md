@@ -16,6 +16,24 @@
 > 3. **Read-only by default.** The server exposes only read-only tools unless you set
 >    `GMAIL_ENABLE_WRITE_TOOLS=true`. Send/draft/reply/delete/modify and label/filter management are
 >    hidden until opted in. See [Read-only by default](#read-only-by-default) below.
+> 4. **MCP TypeScript SDK v2 / protocol revision 2026-07-28.** The tool server serves both protocol
+>    eras from one binary. See [MCP protocol support](#mcp-protocol-support) below.
+
+## MCP protocol support
+
+The tool server is built on the [MCP TypeScript SDK v2](https://github.com/modelcontextprotocol/typescript-sdk) (`@modelcontextprotocol/server`) and serves **both protocol eras over stdio from a single process**, via the SDK's `serveStdio` entrypoint:
+
+| Client opens with | Negotiated revision |
+| --- | --- |
+| A per-request `_meta` envelope naming a modern revision (or a `server/discover` probe) | `2026-07-28` |
+| The classic `initialize` handshake | `2025-11-25` (or whatever the client offers) |
+
+The era is pinned once per connection, from the opening exchange — nothing needs configuring, and older hosts keep working unchanged.
+
+Two consequences of the SDK upgrade worth knowing:
+
+- **Node.js 20+ is required** (was 14+), and **zod 4.2+** replaces zod 3 (`zod-to-json-schema` is gone — zod 4 emits draft-2020-12 JSON Schema natively).
+- **`gmail-channel` (`src/channel.ts`) stays on the 2025-era wiring.** Claude Code's experimental channel protocol needs an `initialize` handshake to negotiate `capabilities.experimental['claude/channel']` and pushes unsolicited server→client notifications — neither exists in 2026-07-28, which replaces push notifications with client-driven `subscriptions/listen`. The channel entrypoint is on SDK v2 but deliberately serves only the 2025 era.
 
 ## Read allowlist (trusted senders only)
 

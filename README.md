@@ -32,7 +32,7 @@ The era is pinned once per connection, from the opening exchange — nothing nee
 
 Two consequences of the SDK upgrade worth knowing:
 
-- **Node.js 20+ is required** (was 14+), and **zod 4.2+** replaces zod 3 (`zod-to-json-schema` is gone — zod 4 emits draft-2020-12 JSON Schema natively).
+- **Node.js 22+ is required** (was 14+), and **zod 4.2+** replaces zod 3 (`zod-to-json-schema` is gone — zod 4 emits draft-2020-12 JSON Schema natively). SDK v2 itself only needs Node 20, but Node 20 reached end-of-life on 2026-04-30; 22 is the oldest LTS still receiving security fixes (EOL 2027-04-30), and 24 is the current active LTS.
 - **`gmail-channel` (`src/channel.ts`) stays on the 2025-era wiring.** Claude Code's experimental channel protocol needs an `initialize` handshake to negotiate `capabilities.experimental['claude/channel']` and pushes unsolicited server→client notifications — neither exists in 2026-07-28, which replaces push notifications with client-driven `subscriptions/listen`. The channel entrypoint is on SDK v2 but deliberately serves only the 2025 era.
 
 ## Read allowlist (trusted senders only)

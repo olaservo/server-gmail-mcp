@@ -190,7 +190,10 @@ export async function loadCredentials() {
         if (fs.existsSync(localOAuthPath)) {
             // If found in current directory, copy to config directory
             fs.copyFileSync(localOAuthPath, OAUTH_PATH);
-            console.log('OAuth keys found in current directory, copied to global config.');
+            // stderr, not stdout: loadCredentials() runs on the server path, where
+            // stdout is the JSON-RPC channel and MUST carry nothing but MCP messages
+            // (stdio transport spec). One stray line here breaks the client's parser.
+            console.error('OAuth keys found in current directory, copied to global config.');
         }
 
         if (!fs.existsSync(OAUTH_PATH)) {

@@ -995,13 +995,13 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 To bypass for commits that genuinely don't need a docs update (dependency bumps, CI config changes), include `[skip-readme]` or `[no-readme]` in your commit message or PR title.
 
 
-## Running evals
-
-The evals package loads an mcp client that then runs the index.ts file, so there is no need to rebuild between tests. You can load environment variables by prefixing the npx command. Full documentation can be found [here](https://www.mcpevals.io/docs).
+## Tests
 
 ```bash
-OPENAI_API_KEY=your-key  npx mcp-eval src/evals/evals.ts src/index.ts
+npm test
 ```
+
+> The `mcp-evals` scoring harness that used to live in `src/evals` was removed in v3.0.0: it still pins the v1 MCP SDK and zod 3, which cannot coexist with the zod 4 floor that SDK v2 requires.
 
 ## License
 

@@ -11,9 +11,5 @@
       "forceConsistentCasingInFileNames": true
     },
     "include": ["src/**/*"],
-    // src/evals is a dev-only scoring harness for mcp-evals, which still pins the
-    // v1 SDK and zod 3. That tree can no longer hoist alongside zod 4 (required by
-    // @modelcontextprotocol/server v2), so @ai-sdk/openai does not resolve from the
-    // root. It is not part of the shipped server; keep it out of the build.
-    "exclude": ["node_modules", "dist", "src/**/*.test.ts", "src/evals"]
+    "exclude": ["node_modules", "dist", "src/**/*.test.ts"]
   }

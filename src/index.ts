@@ -5,6 +5,7 @@ import { Server } from "@modelcontextprotocol/server";
 import type { CallToolRequest, CallToolResult, ListToolsResult } from "@modelcontextprotocol/server";
 import fs from 'fs';
 import path from 'path';
+import { createRequire } from 'node:module';
 import {createEmailMessage, createEmailWithNodemailer} from "./utl.js";
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
@@ -18,6 +19,11 @@ import { CREDENTIALS_PATH, loadCredentials, authenticate, getGmail, getAuthorize
 // Gmail OAuth bootstrap, config paths (CREDENTIALS_PATH), response types
 // (GmailMessagePart/EmailContent), and MIME parsing helpers now live in
 // ./gmail-client.ts, shared with the channel entrypoint (channel.ts).
+
+// Implementation.version the server reports to clients. Read from package.json
+// rather than hardcoded so it can never drift from the published version.
+// Resolves the same from src/ (dev) and dist/ (build): both sit one level down.
+const { version: SERVER_VERSION } = createRequire(import.meta.url)('../package.json') as { version: string };
 
 // Main function
 async function main() {
@@ -128,6 +134,7 @@ async function main() {
         const toolDef = getToolByName(name);
         if (!toolDef || !hasScope(getAuthorizedScopes(), toolDef.scopes)) {
             return {
+                isError: true,
                 content: [{
                     type: "text",
                     text: `Error: Tool "${name}" is not available. You may need to re-authenticate with additional scopes.`,
@@ -138,6 +145,7 @@ async function main() {
         // Guard against direct calls to write tools while in read-only (default) mode.
         if (!writeToolsEnabled && !isReadOnlyTool(toolDef)) {
             return {
+                isError: true,
                 content: [{
                     type: "text",
                     text: `Error: Tool "${name}" is a write operation and is disabled. Set GMAIL_ENABLE_WRITE_TOOLS=true to enable write tools.`,
@@ -1400,7 +1408,11 @@ async function main() {
                     throw new Error(`Unknown tool: ${name}`);
             }
         } catch (error: any) {
+            // Tool execution errors are reported in the result with isError: true,
+            // not as JSON-RPC protocol errors — the spec wants them handed to the
+            // model so it can self-correct and retry.
             return {
+                isError: true,
                 content: [
                     {
                         type: "text",
@@ -1419,7 +1431,7 @@ async function main() {
         const server = new Server(
             {
                 name: "gmail",
-                version: "1.0.0",
+                version: SERVER_VERSION,
             },
             {
                 capabilities: {

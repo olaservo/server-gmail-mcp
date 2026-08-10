@@ -15,7 +15,9 @@
 >    triaging an inbox. See [Read allowlist](#read-allowlist-trusted-senders-only) below.
 > 3. **Read-only by default.** The server exposes only read-only tools unless you set
 >    `GMAIL_ENABLE_WRITE_TOOLS=true`. Send/draft/reply/delete/modify and label/filter management are
->    hidden until opted in. See [Read-only by default](#read-only-by-default) below.
+>    hidden until opted in, and the two tools that write files to disk need their own opt-in
+>    (`GMAIL_DOWNLOAD_DIR`), which also confines where they may write. See
+>    [Read-only by default](#read-only-by-default) below.
 > 4. **MCP TypeScript SDK v2 / protocol revision 2026-07-28.** The tool server serves both protocol
 >    eras from one binary. See [MCP protocol support](#mcp-protocol-support) below.
 
@@ -25,7 +27,7 @@ The tool server is built on the [MCP TypeScript SDK v2](https://github.com/model
 
 | Client opens with | Negotiated revision |
 | --- | --- |
-| A per-request `_meta` envelope naming a modern revision (or a `server/discover` probe) | `2026-07-28` |
+| A per-request `_meta` envelope naming a modern revision — including on a `server/discover` probe, which negotiating clients always send with that envelope | `2026-07-28` |
 | The classic `initialize` handshake | `2025-11-25` (or whatever the client offers) |
 
 The era is pinned once per connection, from the opening exchange — nothing needs configuring, and older hosts keep working unchanged.
@@ -33,6 +35,13 @@ The era is pinned once per connection, from the opening exchange — nothing nee
 Two consequences of the SDK upgrade worth knowing:
 
 - **Node.js 22+ is required** (was 14+), and **zod 4.2+** replaces zod 3 (`zod-to-json-schema` is gone — zod 4 emits draft-2020-12 JSON Schema natively). SDK v2 itself only needs Node 20, but Node 20 reached end-of-life on 2026-04-30; 22 is the oldest LTS still receiving security fixes (EOL 2027-04-30), and 24 is the current active LTS.
+- **Dependencies swept with the runtime floor.** `nodemailer` 7 → 9 (message-composition advisories:
+  CRLF injection via `List-*` header comments, and `raw` bypassing `disableFileAccess`/
+  `disableUrlAccess` — both reachable here, since messages are composed from tool arguments) and
+  `googleapis` 129 → 174 (clears the `uuid < 11.1.1` chain via `gaxios`/`googleapis-common`).
+  `npm audit --omit=dev` is clean and enforced in CI. `google-auth-library` is no longer a direct
+  dependency: `OAuth2Client` now comes from `google.auth.OAuth2`, so there is only ever one copy in
+  the tree — two copies are nominally distinct types that `google.gmail({ auth })` rejects.
 - **`gmail-channel` (`src/channel.ts`) stays on the 2025-era wiring.** Claude Code's experimental channel protocol needs an `initialize` handshake to negotiate `capabilities.experimental['claude/channel']` and pushes unsolicited server→client notifications — neither exists in 2026-07-28, which replaces push notifications with client-driven `subscriptions/listen`. The channel entrypoint is on SDK v2 but deliberately serves only the 2025 era.
 
 ## Read allowlist (trusted senders only)
@@ -83,6 +92,36 @@ and refused if called directly.
 - The read tools that remain available are still subject to the fail-closed read allowlist above.
   Note that `list_email_labels`, `list_filters`, and `get_filter` are read-only and therefore stay
   available by default.
+
+### Download tools (`GMAIL_DOWNLOAD_DIR`)
+
+`download_email` and `download_attachment` read the mailbox but write bytes to a **model-supplied
+path**, so they are not read-only (`readOnlyHint` means "does not modify its environment") and are
+not exposed by default. Without a boundary, a prompt injection inside an allowlisted sender's mail
+can steer a write anywhere the server process can reach — a config directory, a `PATH` entry.
+
+- **Enable them:** set `GMAIL_DOWNLOAD_DIR=/path/to/dir`. That single setting both exposes the two
+  tools *and* confines them: a `savePath` outside the directory is refused, a relative one is
+  resolved inside it, and omitting it writes to the directory root.
+- `GMAIL_ENABLE_WRITE_TOOLS=true` also exposes them (it exposes everything), but **does not**
+  confine them — set `GMAIL_DOWNLOAD_DIR` as well if you want the boundary in full-access mode.
+- The allowlist guard runs *before* any directory is created, so a blocked read leaves nothing on
+  disk.
+
+```json
+{
+  "mcpServers": {
+    "gmail": {
+      "command": "npx",
+      "args": ["@gongrzhe/server-gmail-autoauth-mcp"],
+      "env": {
+        "GMAIL_READ_ALLOWLIST": "alice@example.com, @trusted.org",
+        "GMAIL_DOWNLOAD_DIR": "/home/you/gmail-downloads"
+      }
+    }
+  }
+}
+```
 
 ---
 
@@ -370,14 +409,16 @@ Then add to your Claude Code MCP settings (`~/.claude/mcp_settings.json` or proj
 With read-only scopes, only these read-only tools are available to Claude:
 - `read_email` - Read email content
 - `search_emails` - Search your inbox
-- `download_attachment` - Download attachments
-- `download_email` - Download an email to a file
 - `get_thread` - Read a full thread
 - `list_inbox_threads` - List threads
 - `get_inbox_with_threads` - List threads with full message bodies
 - `list_email_labels` - List available labels
 
 (This is also the default tool set for *any* scope when `GMAIL_ENABLE_WRITE_TOOLS` is not set.)
+
+`download_email` and `download_attachment` also work under read-only scopes, but they write files to
+disk and so need `GMAIL_DOWNLOAD_DIR` set — see
+[Download tools](#download-tools-gmail_download_dir).
 
 ### Full Access Configuration
 
@@ -512,8 +553,12 @@ Attachments (2):
 Parameters:
 - `messageId`: The ID of the email containing the attachment
 - `attachmentId`: The attachment ID (shown in enhanced email display)
-- `savePath`: Directory to save the file (optional, defaults to current directory)
+- `savePath`: Directory to save the file (optional, defaults to current directory — or to
+  `GMAIL_DOWNLOAD_DIR` when set, which it may not escape)
 - `filename`: Custom filename (optional, uses original filename if not provided)
+
+> Requires `GMAIL_DOWNLOAD_DIR` (or `GMAIL_ENABLE_WRITE_TOOLS=true`) — this tool writes to disk and
+> is not exposed by default. See [Download tools](#download-tools-gmail_download_dir).
 
 ### 5. Search Emails (`search_emails`)
 Searches for emails using Gmail search syntax.
@@ -990,10 +1035,24 @@ The server includes efficient batch processing capabilities:
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
-**CI requires README updates** — every push to `main` and every PR must include a README.md change (even a version bump or changelog entry). This ensures documentation stays current as the codebase evolves.
+> The "CI requires README updates" rule described upstream is not enforced in this fork. See
+> [CI](#ci) for what actually runs.
 
-To bypass for commits that genuinely don't need a docs update (dependency bumps, CI config changes), include `[skip-readme]` or `[no-readme]` in your commit message or PR title.
+## CI
 
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request, against Node 22 (the
+`engines` floor) and Node 24 (the current active LTS):
+
+```bash
+npm ci                          # also runs the build via the prepare script
+npm run build
+npx tsc -p tsconfig.test.json   # type-checks src/ *and* the test files
+npm test
+npm audit --omit=dev --audit-level=high
+```
+
+`tsconfig.json` excludes `src/**/*.test.ts` so tests never land in `dist/`; `tsconfig.test.json`
+extends it without that exclusion so type errors in tests are still caught.
 
 ## Tests
 

@@ -1,0 +1,11 @@
+{
+  // Type-checks the test files too. The build config excludes them (they must
+  // not land in dist/), which left `npx tsc --noEmit` blind to type errors in
+  // tests. Checked in CI via `tsc -p tsconfig.test.json --noEmit`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

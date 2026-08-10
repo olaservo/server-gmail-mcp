@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
-import { Server } from "@modelcontextprotocol/server";
+import { Server, ProtocolError, INVALID_PARAMS, INTERNAL_ERROR } from "@modelcontextprotocol/server";
 import type { CallToolRequest, CallToolResult, ListToolsResult } from "@modelcontextprotocol/server";
 import fs from 'fs';
 import path from 'path';
@@ -11,9 +11,11 @@ import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, get
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
 import { DEFAULT_SCOPES, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
-import { toolDefinitions, toMcpTools, getToolByName, isReadOnlyTool, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema } from "./tools.js";
+import type { ToolDefinition } from "./tools.js";
+import { toolDefinitions, toMcpTools, getToolByName, isToolExposed, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 import { loadAllowlist, isAllowed, allowlistToFromQuery, combineQuery, blockedMessage, Allowlist } from "./allowlist.js";
+import { loadDownloadRoot, resolveDownloadPath } from "./download-root.js";
 import { CREDENTIALS_PATH, loadCredentials, authenticate, getGmail, getAuthorizedScopes, extractEmailContent, extractHeaders, extractAttachments, dmarcPassed, GmailMessagePart, EmailContent } from "./gmail-client.js";
 
 // Gmail OAuth bootstrap, config paths (CREDENTIALS_PATH), response types
@@ -96,6 +98,21 @@ async function main() {
         );
     }
 
+    // download_email/download_attachment read the mailbox but write bytes to a
+    // model-supplied path, so they are not read-only. GMAIL_DOWNLOAD_DIR both
+    // exposes them in read-only mode and confines where they may write.
+    const downloadRoot = loadDownloadRoot(process.env.GMAIL_DOWNLOAD_DIR);
+    if (!writeToolsEnabled && downloadRoot === null) {
+        console.warn(
+            'Download tools are disabled: they write files to disk. '
+            + 'Set GMAIL_DOWNLOAD_DIR=/path/to/dir to enable them, confined to that directory.'
+        );
+    }
+
+    // A tool is exposed if it mutates nothing, or if the matching opt-in is set.
+    const exposureOpts = { writeToolsEnabled, downloadsEnabled: downloadRoot !== null };
+    const exposed = (tool: ToolDefinition) => isToolExposed(tool, exposureOpts);
+
     /**
      * Read guard: returns a refusal content object if reading mail from
      * `fromHeader` is not permitted by the allowlist, or null if allowed.
@@ -120,8 +137,7 @@ async function main() {
     // Filter available tools based on authorized scopes
     const listToolsHandler = async (): Promise<ListToolsResult> => {
         const availableTools = toolDefinitions.filter(tool =>
-            hasScope(getAuthorizedScopes(), tool.scopes) &&
-            (writeToolsEnabled || isReadOnlyTool(tool))
+            hasScope(getAuthorizedScopes(), tool.scopes) && exposed(tool)
         );
         return { tools: toMcpTools(availableTools) };
     };
@@ -129,10 +145,18 @@ async function main() {
     const callToolHandler = async (request: CallToolRequest): Promise<CallToolResult> => {
         const { name, arguments: args } = request.params;
 
-        // Verify the tool is authorized for the current scopes
-        // This guards against direct tool calls that bypass ListTools
+        // A name that is not in the registry is a bad request, not a failed
+        // execution: the spec models it as JSON-RPC -32602, not an isError result.
         const toolDef = getToolByName(name);
-        if (!toolDef || !hasScope(getAuthorizedScopes(), toolDef.scopes)) {
+        if (!toolDef) {
+            throw new ProtocolError(INVALID_PARAMS, `Unknown tool: ${name}`);
+        }
+
+        // Verify the tool is authorized for the current scopes. This guards against
+        // direct tool calls that bypass ListTools. Reported in-band (isError) rather
+        // than as a protocol error: the tool exists, and re-authenticating is
+        // something the model can surface and the user can act on.
+        if (!hasScope(getAuthorizedScopes(), toolDef.scopes)) {
             return {
                 isError: true,
                 content: [{
@@ -142,14 +166,14 @@ async function main() {
             };
         }
 
-        // Guard against direct calls to write tools while in read-only (default) mode.
-        if (!writeToolsEnabled && !isReadOnlyTool(toolDef)) {
+        // Guard against direct calls to tools that ListTools is hiding.
+        if (!exposed(toolDef)) {
+            const remedy = toolDef.writesToDisk
+                ? `Error: Tool "${name}" writes files to disk and is disabled. Set GMAIL_DOWNLOAD_DIR to a directory to enable it.`
+                : `Error: Tool "${name}" is a write operation and is disabled. Set GMAIL_ENABLE_WRITE_TOOLS=true to enable write tools.`;
             return {
                 isError: true,
-                content: [{
-                    type: "text",
-                    text: `Error: Tool "${name}" is a write operation and is disabled. Set GMAIL_ENABLE_WRITE_TOOLS=true to enable write tools.`,
-                }],
+                content: [{ type: "text", text: remedy }],
             };
         }
 
@@ -419,7 +443,7 @@ async function main() {
                     const response = await gmail.users.messages.list({
                         userId: 'me',
                         q: guardedQuery,
-                        maxResults: validatedArgs.maxResults || 10,
+                        maxResults: validatedArgs.maxResults ?? 10,
                     });
 
                     const messages = response.data.messages || [];
@@ -459,13 +483,11 @@ async function main() {
 
                 case "download_email": {
                     const validatedArgs = DownloadEmailSchema.parse(args);
-                    const { messageId, savePath, format } = validatedArgs;
+                    const { messageId, format } = validatedArgs;
 
                     try {
-                        // Ensure save directory exists
-                        if (!fs.existsSync(savePath)) {
-                            fs.mkdirSync(savePath, { recursive: true });
-                        }
+                        // Confine the model-supplied path to GMAIL_DOWNLOAD_DIR when set.
+                        const savePath = resolveDownloadPath(validatedArgs.savePath, downloadRoot, validatedArgs.savePath);
 
                         // Always fetch full message for metadata (needed for attachments list)
                         const fullResponse = await gmail.users.messages.get({
@@ -476,9 +498,15 @@ async function main() {
 
                         const { subject, from, date } = extractHeaders(fullResponse.data.payload);
 
-                        // Allowlist guard: do not write untrusted mail to disk.
+                        // Allowlist guard: do not write untrusted mail to disk. Runs
+                        // before the directory is created so a blocked read leaves no trace.
                         const dlBlock = readGuard(from, 'This email', fullResponse.data.payload as GmailMessagePart);
                         if (dlBlock) return dlBlock;
+
+                        // Ensure save directory exists
+                        if (!fs.existsSync(savePath)) {
+                            fs.mkdirSync(savePath, { recursive: true });
+                        }
 
                         const attachments = extractAttachments(fullResponse.data.payload as GmailMessagePart);
 
@@ -975,8 +1003,9 @@ async function main() {
                         const data = attachmentResponse.data.data;
                         const buffer = Buffer.from(data, 'base64url');
 
-                        // Determine save path and filename
-                        const savePath = validatedArgs.savePath || process.cwd();
+                        // Determine save path and filename. Confine the model-supplied
+                        // path to GMAIL_DOWNLOAD_DIR when set.
+                        const savePath = resolveDownloadPath(validatedArgs.savePath, downloadRoot, process.cwd());
                         let filename = validatedArgs.filename;
 
                         if (!filename) {
@@ -1407,12 +1436,17 @@ async function main() {
                 }
 
                 default:
-                    throw new Error(`Unknown tool: ${name}`);
+                    // Unreachable for an unknown name — that is rejected above as
+                    // -32602. Reaching here means toolDefinitions lists a tool this
+                    // switch does not implement, which is a server bug.
+                    throw new ProtocolError(INTERNAL_ERROR, `Tool "${name}" is registered but not implemented`);
             }
         } catch (error: any) {
             // Tool execution errors are reported in the result with isError: true,
             // not as JSON-RPC protocol errors — the spec wants them handed to the
-            // model so it can self-correct and retry.
+            // model so it can self-correct and retry. Protocol-level errors are the
+            // exception and travel on the wire as JSON-RPC errors.
+            if (ProtocolError.isInstance(error)) throw error;
             return {
                 isError: true,
                 content: [
@@ -1457,15 +1491,20 @@ async function main() {
     // is now solely responsible for terminating: guard re-entry (a second Ctrl-C
     // must not restart the close) and keep an unref'd timer as the backstop for a
     // close() that never settles, so the process still dies on SIGINT/SIGTERM.
+    // Exit 128+signo, the convention for signal-terminated processes, so a
+    // supervisor can tell a signal-kill from a clean stop.
     let closing = false;
-    const shutdown = () => {
+    const shutdown = (signo: number) => () => {
         if (closing) return;
         closing = true;
-        setTimeout(() => process.exit(0), 5000).unref();
-        void handle.close().finally(() => process.exit(0));
+        const exit = () => process.exit(128 + signo);
+        setTimeout(exit, 5000).unref();
+        // .catch before .finally: a rejecting close() must not surface as an
+        // unhandled rejection while the exit is in flight.
+        void handle.close().catch(() => {}).finally(exit);
     };
-    process.on('SIGINT', shutdown);
-    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', shutdown(2));
+    process.on('SIGTERM', shutdown(15));
 }
 
 main().catch((error) => {

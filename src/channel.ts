@@ -140,6 +140,21 @@ async function main() {
 
     await mcp.connect(new StdioServerTransport());
 
+    // Same shutdown contract as the tool server (src/index.ts): registering a
+    // handler replaces the default signal disposition, so this is now solely
+    // responsible for terminating. Re-entry guard, unref'd backstop for a close()
+    // that never settles, exit 128+signo.
+    let closing = false;
+    const shutdown = (signo: number) => () => {
+        if (closing) return;
+        closing = true;
+        const exit = () => process.exit(128 + signo);
+        setTimeout(exit, 5000).unref();
+        void mcp.close().catch(() => {}).finally(exit);
+    };
+    process.on('SIGINT', shutdown(2));
+    process.on('SIGTERM', shutdown(15));
+
     const label = await findLabelByName(gmail, LABEL);
     if (!label?.id) {
         log(`label "${LABEL}" not found in this account. Exiting.`);

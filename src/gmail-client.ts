@@ -10,11 +10,11 @@
  * `loadCredentials()`.
  */
 
-import { google } from 'googleapis';
-import { OAuth2Client } from 'google-auth-library';
+import { google, Common } from 'googleapis';
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
+import crypto from 'crypto';
 import open from 'open';
 import os from 'os';
 import { DEFAULT_SCOPES, scopeNamesToUrls } from "./scopes.js";
@@ -46,6 +46,12 @@ export interface EmailContent {
     text: string;
     html: string;
 }
+
+// Take OAuth2Client from googleapis rather than importing google-auth-library
+// directly: googleapis pins its own copy, and two copies in the tree are
+// nominally distinct types that `google.gmail({ auth })` rejects.
+const OAuth2Client = google.auth.OAuth2;
+type OAuth2Client = InstanceType<typeof OAuth2Client>;
 
 // OAuth2 configuration (module-private state)
 let oauth2Client: OAuth2Client;
@@ -190,7 +196,10 @@ export async function loadCredentials() {
         if (fs.existsSync(localOAuthPath)) {
             // If found in current directory, copy to config directory
             fs.copyFileSync(localOAuthPath, OAUTH_PATH);
-            console.log('OAuth keys found in current directory, copied to global config.');
+            // stderr, not stdout: loadCredentials() runs on the server path, where
+            // stdout is the JSON-RPC channel and MUST carry nothing but MCP messages
+            // (stdio transport spec). One stray line here breaks the client's parser.
+            console.error('OAuth keys found in current directory, copied to global config.');
         }
 
         if (!fs.existsSync(OAUTH_PATH)) {
@@ -244,6 +253,26 @@ export async function loadCredentials() {
     }
 }
 
+/** How long to wait for the user to finish consenting before giving up. */
+const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Run the OAuth consent flow and persist the resulting tokens.
+ *
+ * The redirect lands on a loopback listener, which is a public, unauthenticated
+ * endpoint for as long as it is up — any page the user has open can navigate the
+ * browser to it. Two RFC 8252 protections make that safe:
+ *
+ *  - **state**: a random value echoed back by Google and compared here, so a
+ *    callback we did not initiate is rejected. Without it, any site can send the
+ *    browser to /oauth2callback?code=<attacker's code> while auth is in flight
+ *    and this process will exchange it, silently binding the server to the
+ *    *attacker's* mailbox (login CSRF). Compared in constant time.
+ *  - **PKCE**: the authorization code is bound to a verifier only this process
+ *    knows. `gcp-oauth.keys.json` ships the client secret to every user, so for
+ *    an installed app it is not a secret; without PKCE, anyone who intercepts
+ *    the code on the loopback hop can redeem it.
+ */
 export async function authenticate(scopes: string[]) {
     const server = http.createServer();
     server.listen(3000, '127.0.0.1');
@@ -251,10 +280,29 @@ export async function authenticate(scopes: string[]) {
     // Convert shorthand scope names (e.g., "gmail.readonly") to full Google API URLs
     const scopeUrls = scopeNamesToUrls(scopes);
 
+    const state = crypto.randomBytes(32).toString('base64url');
+    const { codeVerifier, codeChallenge } = await oauth2Client.generateCodeVerifierAsync();
+
     return new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const finish = (err?: Error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            server.close();
+            err ? reject(err) : resolve();
+        };
+        const timer = setTimeout(
+            () => finish(new Error(`Timed out after ${AUTH_TIMEOUT_MS / 1000}s waiting for authentication`)),
+            AUTH_TIMEOUT_MS,
+        );
+
         const authUrl = oauth2Client.generateAuthUrl({
             access_type: 'offline',
             scope: scopeUrls,
+            state,
+            code_challenge_method: Common.googleAuthLibrary.CodeChallengeMethod.S256,
+            code_challenge: codeChallenge,
         });
 
         console.log('Requesting scopes:', scopes.join(', '));
@@ -265,17 +313,36 @@ export async function authenticate(scopes: string[]) {
             if (!req.url?.startsWith('/oauth2callback')) return;
 
             const url = new URL(req.url, 'http://localhost:3000');
-            const code = url.searchParams.get('code');
 
+            // The user denied consent, or Google reported a problem.
+            const authError = url.searchParams.get('error');
+            if (authError) {
+                res.writeHead(400);
+                res.end(`Authentication failed: ${authError}`);
+                finish(new Error(`Authorization failed: ${authError}`));
+                return;
+            }
+
+            // Reject any callback we did not initiate before touching the code.
+            if (!timingSafeEqualStr(url.searchParams.get('state'), state)) {
+                res.writeHead(400);
+                res.end('Invalid state parameter.');
+                console.error('Rejected an OAuth callback with a missing or mismatched state parameter.');
+                // Do not settle: this is someone else's callback, and the real one
+                // may still arrive. The timeout bounds the wait.
+                return;
+            }
+
+            const code = url.searchParams.get('code');
             if (!code) {
                 res.writeHead(400);
                 res.end('No code provided');
-                reject(new Error('No code provided'));
+                finish(new Error('No code provided'));
                 return;
             }
 
             try {
-                const { tokens } = await oauth2Client.getToken(code);
+                const { tokens } = await oauth2Client.getToken({ code, codeVerifier });
                 oauth2Client.setCredentials(tokens);
 
                 // Store both tokens and authorized scopes for runtime filtering
@@ -285,13 +352,25 @@ export async function authenticate(scopes: string[]) {
                 res.writeHead(200);
                 res.end('Authentication successful! You can close this window.');
                 console.log('Credentials saved with scopes:', scopes.join(', '));
-                server.close();
-                resolve();
+                finish();
             } catch (error) {
                 res.writeHead(500);
                 res.end('Authentication failed');
-                reject(error);
+                finish(error as Error);
             }
         });
     });
+}
+
+/**
+ * Constant-time string comparison, for the state parameter. Length is not
+ * secret here (it is fixed by us), but timingSafeEqual throws on a mismatch,
+ * so check it first.
+ */
+export function timingSafeEqualStr(a: string | null | undefined, b: string): boolean {
+    if (typeof a !== 'string') return false;
+    const left = Buffer.from(a);
+    const right = Buffer.from(b);
+    if (left.length !== right.length) return false;
+    return crypto.timingSafeEqual(left, right);
 }

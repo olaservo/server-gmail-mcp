@@ -14,6 +14,16 @@
  *       params: { content, meta } })  — content -> tag body, meta -> tag attributes
  *       (meta keys must be identifiers: letters/digits/underscore only).
  *
+ * Protocol era: unlike the tool server (src/index.ts, which serves both eras via
+ * serveStdio), this entrypoint stays on the 2025-era wiring — a hand-constructed
+ * Server on a StdioServerTransport. The channel contract depends on two things the
+ * 2026-07-28 revision does not have: an `initialize` handshake to negotiate the
+ * experimental capability, and unsolicited server->client notifications (2026-07-28
+ * replaces those with client-driven `subscriptions/listen`). Moving this to
+ * serveStdio would let a modern client pin the connection to an instance where
+ * neither exists, so it stays deliberately legacy until Claude's channel protocol
+ * defines a 2026-era shape.
+ *
  * Config (env):
  *   GMAIL_CHANNEL_LABEL              label NAME to watch (required)
  *   GMAIL_CHANNEL_POLL_SECONDS       poll interval, default 30
@@ -39,8 +49,8 @@
 
 import fs from "fs";
 import path from "path";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { Server } from "@modelcontextprotocol/server";
 import {
     CONFIG_DIR,
     CREDENTIALS_PATH,
@@ -129,6 +139,21 @@ async function main() {
     }
 
     await mcp.connect(new StdioServerTransport());
+
+    // Same shutdown contract as the tool server (src/index.ts): registering a
+    // handler replaces the default signal disposition, so this is now solely
+    // responsible for terminating. Re-entry guard, unref'd backstop for a close()
+    // that never settles, exit 128+signo.
+    let closing = false;
+    const shutdown = (signo: number) => () => {
+        if (closing) return;
+        closing = true;
+        const exit = () => process.exit(128 + signo);
+        setTimeout(exit, 5000).unref();
+        void mcp.close().catch(() => {}).finally(exit);
+    };
+    process.on('SIGINT', shutdown(2));
+    process.on('SIGTERM', shutdown(15));
 
     const label = await findLabelByName(gmail, LABEL);
     if (!label?.id) {

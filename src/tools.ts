@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
+import type { Tool } from "@modelcontextprotocol/server";
 
 // Schema definitions
 export const SendEmailSchema = z.object({
@@ -24,7 +24,7 @@ export const ReadEmailSchema = z.object({
 
 export const SearchEmailsSchema = z.object({
   query: z.string().describe("Gmail search query (e.g., 'from:example@gmail.com')"),
-  maxResults: z.number().optional().describe("Maximum number of results to return"),
+  maxResults: z.number().int().min(1).optional().describe("Maximum number of results to return (default: 10)"),
 });
 
 export const ModifyEmailSchema = z.object({
@@ -123,12 +123,12 @@ export const DownloadAttachmentSchema = z.object({
   messageId: z.string().describe("ID of the email message containing the attachment"),
   attachmentId: z.string().describe("ID of the attachment to download"),
   filename: z.string().optional().describe("Filename to save the attachment as (if not provided, uses original filename)"),
-  savePath: z.string().optional().describe("Directory path to save the attachment (defaults to current directory)"),
+  savePath: z.string().optional().describe("Directory path to save the attachment. When GMAIL_DOWNLOAD_DIR is set, this is resolved inside that directory and must stay within it; otherwise it defaults to the current directory."),
 });
 
 export const DownloadEmailSchema = z.object({
   messageId: z.string().describe("ID of the email message to download"),
-  savePath: z.string().describe("Directory path to save the email file"),
+  savePath: z.string().describe("Directory path to save the email file. When GMAIL_DOWNLOAD_DIR is set, this is resolved inside that directory and must stay within it."),
   format: z.enum(['json', 'eml', 'txt', 'html']).optional().default('json')
     .describe("Output format: json (structured data), eml (raw RFC822), txt (plain text), html (formatted HTML)"),
 });
@@ -174,6 +174,14 @@ export interface ToolDefinition {
   schema: z.ZodType<any>;
   scopes: string[]; // Any of these scopes grants access
   annotations: ToolAnnotations;
+  /**
+   * Tool reads the mailbox but writes bytes to the local filesystem, so it is
+   * not `readOnlyHint` (that annotation means "does not modify its environment").
+   * Gated on GMAIL_DOWNLOAD_DIR rather than GMAIL_ENABLE_WRITE_TOOLS: the risk is
+   * a model-chosen path on disk, not a mutation of the mailbox, so the opt-in
+   * that unlocks it is the one that also confines it.
+   */
+  writesToDisk?: boolean;
 }
 
 // Tool registry with scope requirements
@@ -198,7 +206,8 @@ export const toolDefinitions: ToolDefinition[] = [
     description: "Downloads an email attachment to a specified location",
     schema: DownloadAttachmentSchema,
     scopes: ["gmail.readonly", "gmail.modify"],
-    annotations: { title: "Download Attachment", readOnlyHint: true },
+    annotations: { title: "Download Attachment", destructiveHint: false },
+    writesToDisk: true,
   },
 
   // Thread-level operations
@@ -228,7 +237,8 @@ export const toolDefinitions: ToolDefinition[] = [
     description: "Downloads an email to a file in various formats (json, eml, txt, html). Returns metadata only - useful for saving emails without consuming context.",
     schema: DownloadEmailSchema,
     scopes: ["gmail.readonly", "gmail.modify"],
-    annotations: { title: "Download Email", readOnlyHint: true },
+    annotations: { title: "Download Email", destructiveHint: false },
+    writesToDisk: true,
   },
 
   // Email write operations
@@ -359,16 +369,76 @@ export const toolDefinitions: ToolDefinition[] = [
   },
 ];
 
-// Convert tool definitions to MCP tool format
-export function toMcpTools(tools: ToolDefinition[]) {
-  return tools.map(tool => ({
+// Zod 4's JSON Schema emitter leaves `additionalProperties` unset, where
+// zod-to-json-schema used to emit `false` for strip-mode objects. Without it a
+// validating client accepts misspelled arguments (e.g. `maxResult` for
+// `maxResults`), .parse() silently drops them, and the tool runs with defaults
+// instead of surfacing the mistake. Close every generated object back up.
+//
+// Descend only through keywords whose values are themselves schemas. A blind
+// Object.values() walk would also recurse into data — `default`, `const`,
+// `examples`, `enum` — and stamp `additionalProperties: false` into a default
+// object that a client then echoes back as a real argument.
+const SCHEMA_VALUED_KEYWORDS = ["items", "not", "if", "then", "else", "propertyNames", "contains", "unevaluatedItems", "unevaluatedProperties"] as const;
+const SCHEMA_MAP_KEYWORDS = ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"] as const;
+const SCHEMA_LIST_KEYWORDS = ["anyOf", "oneOf", "prefixItems"] as const;
+
+function closeObjects(node: unknown): void {
+  if (node === null || typeof node !== "object" || Array.isArray(node)) return;
+  const schema = node as Record<string, unknown>;
+
+  // `allOf` composes constraints across branches, so no branch sees the whole
+  // object: closing them would reject every input. Leave the branches open and
+  // don't close a node that is itself an allOf composition.
+  const composed = Array.isArray(schema.allOf);
+  if (schema.type === "object" && schema.additionalProperties === undefined && !composed) {
+    schema.additionalProperties = false;
+  }
+
+  for (const key of SCHEMA_VALUED_KEYWORDS) closeObjects(schema[key]);
+  if (typeof schema.additionalProperties === "object") closeObjects(schema.additionalProperties);
+  for (const key of SCHEMA_MAP_KEYWORDS) {
+    const map = schema[key];
+    if (map && typeof map === "object" && !Array.isArray(map)) {
+      Object.values(map as Record<string, unknown>).forEach(closeObjects);
+    }
+  }
+  for (const key of SCHEMA_LIST_KEYWORDS) {
+    const list = schema[key];
+    if (Array.isArray(list)) list.forEach(closeObjects);
+  }
+}
+
+// Convert tool definitions to MCP tool format.
+// Zod 4 emits JSON Schema natively; `io: 'input'` describes what a caller sends
+// (fields with .default() stay optional) and draft-2020-12 is the dialect the
+// 2025-11-25+ spec advertises for tool inputSchema.
+//
+// The schema set is fixed at module load, so emit each tool once and reuse it:
+// tools/list is answered per request, and serveStdio may build a second server
+// instance for a connection that probes the 2026-07-28 era.
+const mcpToolCache = new Map<string, Tool>();
+
+function toMcpTool(tool: ToolDefinition): Tool {
+  const cached = mcpToolCache.get(tool.name);
+  if (cached) return cached;
+  const inputSchema = z.toJSONSchema(tool.schema, {
+    io: "input",
+    target: "draft-2020-12",
+  });
+  closeObjects(inputSchema);
+  const mcpTool: Tool = {
     name: tool.name,
     description: tool.description,
-    // Cast to any: zod 3.25 + TS 5.9 otherwise hit TS2589 (excessively deep type
-    // instantiation) on the union of schema types. Runtime behaviour is unchanged.
-    inputSchema: zodToJsonSchema(tool.schema as any),
+    inputSchema: inputSchema as Tool["inputSchema"],
     annotations: tool.annotations,
-  }));
+  };
+  mcpToolCache.set(tool.name, mcpTool);
+  return mcpTool;
+}
+
+export function toMcpTools(tools: ToolDefinition[]): Tool[] {
+  return tools.map(toMcpTool);
 }
 
 // Get a tool definition by name
@@ -379,4 +449,25 @@ export function getToolByName(name: string): ToolDefinition | undefined {
 // A tool is read-only iff it declares readOnlyHint. Everything else mutates state.
 export function isReadOnlyTool(tool: ToolDefinition): boolean {
   return tool.annotations.readOnlyHint === true;
+}
+
+// A tool that reads the mailbox but writes the result to a caller-supplied path.
+export function isDiskWriteTool(tool: ToolDefinition): boolean {
+  return tool.writesToDisk === true;
+}
+
+/**
+ * Whether a tool is exposed to the client, given the two opt-ins.
+ * Read-only tools are always exposed; mailbox writes need GMAIL_ENABLE_WRITE_TOOLS;
+ * disk writes need either (GMAIL_DOWNLOAD_DIR also confines where they may write).
+ *
+ * Shared by ListTools and CallTool so a hidden tool cannot be invoked directly.
+ */
+export function isToolExposed(
+  tool: ToolDefinition,
+  opts: { writeToolsEnabled: boolean; downloadsEnabled: boolean },
+): boolean {
+  if (isReadOnlyTool(tool)) return true;
+  if (opts.writeToolsEnabled) return true;
+  return isDiskWriteTool(tool) && opts.downloadsEnabled;
 }

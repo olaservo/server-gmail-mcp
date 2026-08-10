@@ -40,12 +40,12 @@
   "license": "ISC",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/olaservo/server-gmail-autoauth-mcp.git"
+    "url": "git+https://github.com/olaservo/server-gmail-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/olaservo/server-gmail-autoauth-mcp/issues"
+    "url": "https://github.com/olaservo/server-gmail-mcp/issues"
   },
-  "homepage": "https://github.com/olaservo/server-gmail-autoauth-mcp#readme",
+  "homepage": "https://github.com/olaservo/server-gmail-mcp#readme",
   "publishConfig": {
     "access": "public"
   },

@@ -55,6 +55,7 @@ import {
     CONFIG_DIR,
     CREDENTIALS_PATH,
     loadCredentials,
+    hasCredentials,
     getGmail,
     extractHeaders,
     extractEmailContent,
@@ -104,6 +105,12 @@ async function main() {
     );
 
     await loadCredentials();
+    // Fail fast rather than stalling on Application Default Credentials discovery
+    // when no token is present — see hasCredentials() in gmail-client.ts.
+    if (!hasCredentials()) {
+        log(`no Gmail credentials found at ${CREDENTIALS_PATH}. Run the server's \`auth\` command first. Exiting.`);
+        process.exit(1);
+    }
     const gmail = getGmail();
 
     // Sender gating (prompt-injection hardening): only push mail whose From is on

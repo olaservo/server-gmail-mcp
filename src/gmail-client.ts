@@ -56,10 +56,24 @@ type OAuth2Client = InstanceType<typeof OAuth2Client>;
 // OAuth2 configuration (module-private state)
 let oauth2Client: OAuth2Client;
 let authorizedScopes: string[] = DEFAULT_SCOPES;
+let credentialsLoaded = false;
 
 /** Returns the authorized scopes loaded from the credentials file (or defaults). */
 export function getAuthorizedScopes(): string[] {
     return authorizedScopes;
+}
+
+/**
+ * Whether loadCredentials() found a usable token. Callers that are about to make
+ * a Gmail API call must check this and bail out with a "run auth" message: an
+ * OAuth2Client with no credentials does not fail fast, it falls through to
+ * Application Default Credentials discovery and probes the GCE metadata server,
+ * which hangs for a long time on an ordinary machine. On the server path that
+ * happens before the transport is connected, so the client just sees a server
+ * that never answers `initialize`.
+ */
+export function hasCredentials(): boolean {
+    return credentialsLoaded;
 }
 
 /** Returns a Gmail API client bound to the loaded OAuth credentials. Call loadCredentials() first. */
@@ -242,6 +256,7 @@ export async function loadCredentials() {
             // credentials will get DEFAULT_SCOPES (full access) until they re-authenticate.
             const tokens = credentials.tokens || credentials;
             oauth2Client.setCredentials(tokens);
+            credentialsLoaded = Boolean(tokens?.refresh_token || tokens?.access_token);
 
             if (credentials.scopes) {
                 authorizedScopes = credentials.scopes;

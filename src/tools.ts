@@ -359,20 +359,42 @@ export const toolDefinitions: ToolDefinition[] = [
   },
 ];
 
+// Zod 4's JSON Schema emitter leaves `additionalProperties` unset, where
+// zod-to-json-schema used to emit `false` for strip-mode objects. Without it a
+// validating client accepts misspelled arguments (e.g. `maxResult` for
+// `maxResults`), .parse() silently drops them, and the tool runs with defaults
+// instead of surfacing the mistake. Close every generated object back up.
+function closeObjects(node: unknown): void {
+  if (Array.isArray(node)) {
+    node.forEach(closeObjects);
+    return;
+  }
+  if (node === null || typeof node !== "object") return;
+  const schema = node as Record<string, unknown>;
+  if (schema.type === "object" && schema.additionalProperties === undefined) {
+    schema.additionalProperties = false;
+  }
+  Object.values(schema).forEach(closeObjects);
+}
+
 // Convert tool definitions to MCP tool format.
 // Zod 4 emits JSON Schema natively; `io: 'input'` describes what a caller sends
 // (fields with .default() stay optional) and draft-2020-12 is the dialect the
 // 2025-11-25+ spec advertises for tool inputSchema.
 export function toMcpTools(tools: ToolDefinition[]): Tool[] {
-  return tools.map(tool => ({
-    name: tool.name,
-    description: tool.description,
-    inputSchema: z.toJSONSchema(tool.schema, {
+  return tools.map(tool => {
+    const inputSchema = z.toJSONSchema(tool.schema, {
       io: "input",
       target: "draft-2020-12",
-    }) as Tool["inputSchema"],
-    annotations: tool.annotations,
-  }));
+    });
+    closeObjects(inputSchema);
+    return {
+      name: tool.name,
+      description: tool.description,
+      inputSchema: inputSchema as Tool["inputSchema"],
+      annotations: tool.annotations,
+    };
+  });
 }
 
 // Get a tool definition by name

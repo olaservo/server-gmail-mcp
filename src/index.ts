@@ -1453,7 +1453,15 @@ async function main() {
         onerror: (error) => console.error('Server error:', error),
     });
 
+    // Registering a handler replaces the default signal disposition, so this code
+    // is now solely responsible for terminating: guard re-entry (a second Ctrl-C
+    // must not restart the close) and keep an unref'd timer as the backstop for a
+    // close() that never settles, so the process still dies on SIGINT/SIGTERM.
+    let closing = false;
     const shutdown = () => {
+        if (closing) return;
+        closing = true;
+        setTimeout(() => process.exit(0), 5000).unref();
         void handle.close().finally(() => process.exit(0));
     };
     process.on('SIGINT', shutdown);

@@ -17,9 +17,9 @@ jobs:
         # 22 is the engines floor (EOL 2027-04-30); 24 is the current active LTS.
         node-version: ['22', '24']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm

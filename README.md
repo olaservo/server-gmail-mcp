@@ -999,6 +999,14 @@ The server includes efficient batch processing capabilities:
 
 ## Security Notes
 
+- **The consent flow uses `state` and PKCE (RFC 8252).** The redirect lands on a loopback listener,
+  which is an unauthenticated endpoint for as long as it is up — any page the user has open can
+  navigate the browser to it. A random `state` is echoed back by Google and compared in constant
+  time, so a callback this process did not initiate is refused (without it, any site could send the
+  browser to `/oauth2callback?code=<attacker's code>` mid-flow and bind your server to *their*
+  mailbox). PKCE binds the authorization code to a verifier only this process knows, which matters
+  because `gcp-oauth.keys.json` ships the client secret to every user and so is not a secret for an
+  installed app. The flow also times out after 5 minutes rather than waiting forever.
 - OAuth credentials are stored securely in your local environment (`~/.gmail-mcp/`)
 - The server uses offline access to maintain persistent authentication
 - Never share or commit your credentials to version control

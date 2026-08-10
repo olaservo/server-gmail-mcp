@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { authResults, dmarcPassed } from './gmail-client.js';
+import { authResults, dmarcPassed, timingSafeEqualStr } from './gmail-client.js';
 
 // Build a minimal message payload with the given Authentication-Results header(s).
 const payload = (...authValues: string[]): any => ({
@@ -53,5 +53,42 @@ describe('dmarcPassed (spoof defense)', () => {
 
     it('authResults joins and lowercases the header values', () => {
         expect(authResults(payload('DMARC=Pass', 'spf=Pass'))).toBe('dmarc=pass ; spf=pass');
+    });
+});
+
+// The OAuth `state` comparison. A loopback redirect URI is an unauthenticated
+// endpoint for as long as the listener is up, so this predicate is what stops a
+// callback we did not initiate from being exchanged for tokens.
+describe('timingSafeEqualStr', () => {
+    const state = 'EViYa9hZj5C5UY3Lg2h3zm67jcuBSML3w6RhrTuPSyM';
+
+    it('accepts the exact value', () => {
+        expect(timingSafeEqualStr(state, state)).toBe(true);
+    });
+
+    it('rejects a missing state — the login-CSRF case', () => {
+        // URLSearchParams.get() returns null when the parameter is absent.
+        expect(timingSafeEqualStr(null, state)).toBe(false);
+        expect(timingSafeEqualStr(undefined, state)).toBe(false);
+        expect(timingSafeEqualStr('', state)).toBe(false);
+    });
+
+    it('rejects a same-length mismatch', () => {
+        expect(timingSafeEqualStr('A'.repeat(state.length), state)).toBe(false);
+    });
+
+    it('rejects a prefix and a suffix rather than throwing on length', () => {
+        // crypto.timingSafeEqual throws on unequal lengths; the guard must catch it.
+        expect(timingSafeEqualStr(state.slice(0, -1), state)).toBe(false);
+        expect(timingSafeEqualStr(state + 'x', state)).toBe(false);
+    });
+
+    it('rejects a non-string', () => {
+        expect(timingSafeEqualStr(42 as any, state)).toBe(false);
+        expect(timingSafeEqualStr({} as any, state)).toBe(false);
+    });
+
+    it('is case-sensitive', () => {
+        expect(timingSafeEqualStr(state.toLowerCase(), state)).toBe(false);
     });
 });

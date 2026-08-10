@@ -11,7 +11,6 @@
  */
 
 import { google } from 'googleapis';
-import { OAuth2Client } from 'google-auth-library';
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
@@ -46,6 +45,12 @@ export interface EmailContent {
     text: string;
     html: string;
 }
+
+// Take OAuth2Client from googleapis rather than importing google-auth-library
+// directly: googleapis pins its own copy, and two copies in the tree are
+// nominally distinct types that `google.gmail({ auth })` rejects.
+const OAuth2Client = google.auth.OAuth2;
+type OAuth2Client = InstanceType<typeof OAuth2Client>;
 
 // OAuth2 configuration (module-private state)
 let oauth2Client: OAuth2Client;

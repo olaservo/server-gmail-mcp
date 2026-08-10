@@ -16,7 +16,7 @@ import { toolDefinitions, toMcpTools, getToolByName, isToolExposed, SendEmailSch
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 import { loadAllowlist, isAllowed, allowlistToFromQuery, combineQuery, blockedMessage, Allowlist } from "./allowlist.js";
 import { loadDownloadRoot, resolveDownloadPath } from "./download-root.js";
-import { CREDENTIALS_PATH, loadCredentials, authenticate, getGmail, getAuthorizedScopes, extractEmailContent, extractHeaders, extractAttachments, dmarcPassed, GmailMessagePart, EmailContent } from "./gmail-client.js";
+import { CREDENTIALS_PATH, loadCredentials, hasCredentials, authenticate, getGmail, getAuthorizedScopes, extractEmailContent, extractHeaders, extractAttachments, dmarcPassed, GmailMessagePart, EmailContent } from "./gmail-client.js";
 
 // Gmail OAuth bootstrap, config paths (CREDENTIALS_PATH), response types
 // (GmailMessagePart/EmailContent), and MIME parsing helpers now live in
@@ -58,6 +58,17 @@ async function main() {
         await authenticate(scopes);
         console.log('Authentication completed successfully');
         process.exit(0);
+    }
+
+    // Fail fast with an actionable message rather than letting the first API call
+    // stall on Application Default Credentials discovery — see hasCredentials().
+    if (!hasCredentials()) {
+        console.error(
+            `Error: no Gmail credentials found at ${CREDENTIALS_PATH}.\n`
+            + 'Run `npx @olaservo/server-gmail-autoauth-mcp auth` to authenticate first '
+            + '(add --scopes=gmail.readonly for read-only access).'
+        );
+        process.exit(1);
     }
 
     // Initialize Gmail API

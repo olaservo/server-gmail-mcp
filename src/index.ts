@@ -51,7 +51,7 @@ async function main() {
             }
         } else {
             console.log('No --scopes flag specified, using defaults:', DEFAULT_SCOPES.join(', '));
-            console.log('Tip: Use --scopes=gmail.readonly for read-only access');
+            console.log('Tip: Use --scopes=gmail.modify,gmail.settings.basic for write and filter access');
             console.log('Available scopes:', getAvailableScopeNames().join(', '));
         }
 

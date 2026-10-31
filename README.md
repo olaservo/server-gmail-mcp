@@ -17,7 +17,8 @@
 >    `GMAIL_ENABLE_WRITE_TOOLS=true`. Send/draft/reply/delete/modify and label/filter management are
 >    hidden until opted in, and the two tools that write files to disk need their own opt-in
 >    (`GMAIL_DOWNLOAD_DIR`), which also confines where they may write. See
->    [Read-only by default](#read-only-by-default) below.
+>    [Read-only by default](#read-only-by-default) below. `auth` likewise requests only the
+>    `gmail.readonly` OAuth scope unless `--scopes` asks for more.
 > 4. **MCP TypeScript SDK v2 / protocol revision 2026-07-28.** The tool server serves both protocol
 >    eras from one binary. See [MCP protocol support](#mcp-protocol-support) below.
 
@@ -362,17 +363,17 @@ You can limit the server's Gmail access by specifying OAuth scopes during authen
 Use the `--scopes` flag to request only the permissions you need:
 
 ```bash
-# Read-only access (recommended for safe browsing)
-npx @gongrzhe/server-gmail-autoauth-mcp auth --scopes=gmail.readonly
+# Read-only access (the default since 3.1.0; the same as running `auth` with no flag)
+npx @olaservo/server-gmail-autoauth-mcp auth --scopes=gmail.readonly
 
 # Read-only with filter management
-npx @gongrzhe/server-gmail-autoauth-mcp auth --scopes=gmail.readonly,gmail.settings.basic
+npx @olaservo/server-gmail-autoauth-mcp auth --scopes=gmail.readonly,gmail.settings.basic
 
-# Full access (default behavior)
-npx @gongrzhe/server-gmail-autoauth-mcp auth --scopes=gmail.modify,gmail.settings.basic
+# Full access
+npx @olaservo/server-gmail-autoauth-mcp auth --scopes=gmail.modify,gmail.settings.basic
 ```
 
-If no `--scopes` flag is provided, the server defaults to `gmail.modify,gmail.settings.basic` for full functionality.
+If no `--scopes` flag is provided, the server requests only `gmail.readonly`, so the Google consent screen shows a single item and the token cannot send, modify, or delete regardless of `GMAIL_ENABLE_WRITE_TOOLS`. Before 3.1.0 the default was `gmail.modify,gmail.settings.basic`; pass that explicitly if you need write tools.
 
 > **Note**: OAuth scopes are not the only gate. Even with write scopes granted, write tools stay
 > hidden until you set `GMAIL_ENABLE_WRITE_TOOLS=true` — see [Read-only by default](#read-only-by-default).

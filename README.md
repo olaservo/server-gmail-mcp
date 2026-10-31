@@ -76,6 +76,19 @@ Configure via either or both (merged):
 nothing off-list can be returned even if the query is crafted to bypass it. Thread/inbox tools omit
 off-list messages and report a `withheldCount`.
 
+### DMARC verification (`GMAIL_REQUIRE_AUTH`)
+
+The allowlist matches the `From` header, which a sender can forge. Set `GMAIL_REQUIRE_AUTH=true`
+(also `1` / `yes`) to additionally require that Gmail's own `Authentication-Results` header
+(authserv-id `mx.google.com`, override with `GMAIL_AUTHSERV_ID`) reports `dmarc=pass` for the
+message. A message that is on the allowlist but has no Gmail DMARC pass is withheld with a
+"could not be verified" message; a missing verdict fails closed. Verdicts stamped under any other
+authserv-id are ignored, so a forged `Authentication-Results` header does not help an attacker.
+
+Legitimate mail can fail this check: forwarded messages, mailing lists that rewrite headers, and
+senders whose domain publishes no DMARC record. Recommended when the client is an LLM agent
+reading untrusted inboxes.
+
 ## Read-only by default
 
 By default the server exposes **only read-only tools**. The write tools — `send_email`,
